@@ -6,9 +6,10 @@ import cv2
 
 
 @final
-class Camera:
+class CameraSource:
     def __init__(self, source: int = 0):
         self._show_capture = False
+        self._recording = False
         self._capture = cv2.VideoCapture(source)
         self._lock = threading.Lock()
 
@@ -27,16 +28,24 @@ class Camera:
                 if self._show_capture:
                     cv2.imshow("Capture", self._frame.copy())
 
-    def show_capture(self):
+    def toggle_capture(self):
+        with self._lock:
+            if self._show_capture == True:
+                self._show_capture()
+            else:
+                self._hide_capture()
+
+    def _show_capture(self):
         with self._lock:
             self._show_capture = True
 
-    def hide_capture(self):
+    def _hide_capture(self):
         with self._lock:
             self._show_capture = False
             cv2.destroyWindow("Capture")
 
     def snapshot(self) -> str:
+        # TODO: standardise the saving of these artefacts for a per-run/per experiment sort of thing
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         file_name = f"{timestamp}.jpg"
 
@@ -46,10 +55,23 @@ class Camera:
 
         return file_name
 
-    def start_recording(self):
+    def toggle_recording(self):
+        with self._lock:
+            if self._recording == False:
+                self._start_recording()
+            else:
+                self._stop_recording()
+
+    def _start_recording(self):
+        # TODO: implement recording to a file from the camera
+        with self._lock:
+            self._recording = True
         return
 
-    def stop_recording(self):
+    def _stop_recording(self):
+        # TODO: implement recording to a file from the camera
+        with self._lock:
+            self._recording = False
         return
 
     def quit(self):
