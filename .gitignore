@@ -51,6 +51,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Local llm-toolkit artefacts
+recordings/
+
 # Translations
 *.mo
 *.pot
