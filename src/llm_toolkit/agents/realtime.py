@@ -110,7 +110,7 @@ class RealtimeSession:
             bool: Whether the websocket is connected.
         """
 
-        return self._websocket is not None
+        return self._websocket is not None and getattr(self._websocket, "close_code", None) is None
 
     async def connect(self):
         """
@@ -127,8 +127,11 @@ class RealtimeSession:
             websocket_factory = connect
 
         async with self._connection_lock:
-            if self._websocket is not None:
+            if self.connected:
                 return self
+            websocket, self._websocket = self._websocket, None
+            if websocket is not None:
+                await websocket.close()
             self._websocket = await websocket_factory(
                 self.url,
                 additional_headers=self.headers,

@@ -9,6 +9,9 @@ python -m build
 ```
 
 The normal suite makes no provider requests and needs no device permissions.
+Transport integration tests start temporary HTTP and WebSocket servers bound to
+`127.0.0.1`; the test environment must permit loopback sockets. They cover chunked
+downloads, truncation, socket timeouts, connection headers, and remote closure.
 Live-provider tests are opt-in: `RUN_LIVE_TESTS=1 python -m pytest
 tests/test_live_providers.py`. They require configured credentials and incur
 provider charges. The model names are configured in that test file.

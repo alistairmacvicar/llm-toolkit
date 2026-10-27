@@ -7,6 +7,25 @@ from typing import final
 import numpy as np
 
 
+def _pcm_blocks(chunks):
+    """Reassemble split PCM16 samples without copying whole incoming chunks."""
+    pending = b""
+    for chunk in chunks:
+        data = memoryview(chunk).cast("B")
+        if not data:
+            continue
+        if pending:
+            yield pending + bytes(data[:1])
+            data = data[1:]
+            pending = b""
+        length = len(data) - len(data) % 2
+        for offset in range(0, length, 8192):
+            yield data[offset:min(offset + 8192, length)]
+        pending = bytes(data[length:])
+    if pending:
+        raise ValueError("PCM16 audio ends with an incomplete sample")
+
+
 @final
 class AudioOutput:
     """Play PCM or WAV sequentially on a selected physical or virtual device.
@@ -31,7 +50,11 @@ class AudioOutput:
         return [dict(device, index=index) for index, device in enumerate(sd.query_devices())]
 
     def play_pcm(self, chunks, *, channel=None, on_state=None):
-        """Block until all PCM16 chunks drain, with accurate start/end callbacks."""
+        """Play PCM16 with bounded writes, preserving samples split across chunks.
+
+        An incomplete final sample raises ValueError. State callbacks bracket
+        playback and cleanup, including failures.
+        """
         if channel is not None and (type(channel) is not int or not 0 <= channel < self.channels):
             raise ValueError("Output channel is outside the device channel range")
         factory = self._stream_factory
@@ -43,7 +66,7 @@ class AudioOutput:
                 with factory(device=self.device, samplerate=self.sample_rate, channels=self.channels, dtype="float32") as stream:
                     if on_state:
                         on_state(True)
-                    for chunk in chunks:
+                    for chunk in _pcm_blocks(chunks):
                         mono = np.frombuffer(chunk, dtype="<i2").astype(np.float32) / 32768
                         output = np.zeros((len(mono), self.channels), dtype=np.float32)
                         if channel is None:

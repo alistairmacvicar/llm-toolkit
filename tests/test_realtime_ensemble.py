@@ -142,3 +142,38 @@ class RealtimeEnsembleTests(unittest.IsolatedAsyncioTestCase):
         await self.ensemble.append_audio(b"\0\0" * 2400)
         record = await self.ensemble.finish()
         self.assertEqual(len(record["replies"]), 2)
+
+    async def test_failed_turn_delivery_restores_durable_history(self):
+        async def fail_delivery(event):
+            if event["type"] == "turn":
+                raise OSError("Client disconnected")
+        self.ensemble.emit = fail_delivery
+        await self.ensemble.begin(target="Ada")
+        await self.ensemble.append_audio(b"\0\0" * 2400)
+        with self.assertRaisesRegex(OSError, "Client disconnected"):
+            await self.ensemble.finish()
+        self.assertEqual(self.director.public_transcript, [])
+        self.assertEqual(self.director.decisions, [])
+        self.assertEqual(self.director.emotions, {})
+        self.assertTrue(all(not agent.messages for agent in self.director.agents.values()))
+        self.assertEqual(self.ensemble.sessions, {})
+
+    async def test_empty_peer_sessions_are_not_visible_during_connect(self):
+        # Concurrent public connect calls should wait for the same initialization.
+        started, release = asyncio.Event(), asyncio.Event()
+        original = Peer.connect
+        async def pause(peer):
+            started.set()
+            await release.wait()
+            return await original(peer)
+        from unittest.mock import patch
+        with patch.object(Peer, "connect", pause):
+            first = asyncio.create_task(self.ensemble.connect())
+            await started.wait()
+            second = asyncio.create_task(self.ensemble.connect())
+            await asyncio.sleep(0)
+            try:
+                self.assertFalse(second.done())
+            finally:
+                release.set()
+                await asyncio.gather(first, second)

@@ -181,3 +181,14 @@ def test_invalid_buffer_duration_never_opens_hardware(seconds):
     with patch.object(microphone.sd, "InputStream") as stream, pytest.raises(ValueError):
         microphone.MicrophoneSource(monitor_buffer_seconds=seconds)
     stream.assert_not_called()
+
+
+def test_worker_start_failure_closes_input_stream():
+    stream = Mock()
+    thread = Mock()
+    thread.start.side_effect = RuntimeError("thread unavailable")
+    with patch.object(microphone.sd, "InputStream", return_value=stream), patch.object(
+        microphone.MicrophoneSource, "_get_input_source", return_value={"index": 1}
+    ), patch.object(microphone.threading, "Thread", return_value=thread), pytest.raises(RuntimeError):
+        microphone.MicrophoneSource()
+    stream.close.assert_called_once()

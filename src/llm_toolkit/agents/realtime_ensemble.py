@@ -10,6 +10,7 @@ from typing import final
 from uuid import uuid4
 
 from llm_toolkit.agents.realtime import RealtimeSession
+from llm_toolkit.agents.director import _conversation_transaction
 from llm_toolkit.agents.hierarchy import validate_hierarchy
 from llm_toolkit.agents.turn_policy import decision_schema, eligible_children, turn_instructions, validate_decision
 
@@ -41,12 +42,17 @@ class RealtimeEnsemble:
         self.busy = False
         self._audio = bytearray()
         self._active_peer = None
+        self._connection_lock = asyncio.Lock()
 
     async def _ignore(self, *args):
         pass
 
     async def connect(self):
         """Connect each peer once, retaining sockets across successful turns."""
+        async with self._connection_lock:
+            await self._connect()
+
+    async def _connect(self):
         coordinators = self.director.get_coordinators()
         if not coordinators or any(agent is None for agent in coordinators.values()):
             raise ValueError("A coordinator agent is required for realtime conversations")
@@ -63,7 +69,7 @@ class RealtimeEnsemble:
                 if isinstance(result, BaseException):
                     raise result
         except BaseException:
-            await self.close()
+            await self._close()
             raise
 
     async def _connect_peer(self, name):
@@ -101,6 +107,10 @@ class RealtimeEnsemble:
 
     async def close(self):
         """Release every peer, including partially opened connections."""
+        async with self._connection_lock:
+            await self._close()
+
+    async def _close(self):
         sessions, self.sessions = self.sessions, {}
         await asyncio.gather(*(s.close() for s in sessions.values()), return_exceptions=True)
         self.recording = None
@@ -298,8 +308,9 @@ class RealtimeEnsemble:
 
     async def _commit(self, record, started):
         record["elapsed_seconds"] = perf_counter() - started
-        self.commit_record(self.director, record)
-        await self.emit({"type": "turn", "record": record})
+        with _conversation_transaction(self.director, preserve_decisions=False):
+            self.commit_record(self.director, record)
+            await self.emit({"type": "turn", "record": record})
         return record
 
     @staticmethod

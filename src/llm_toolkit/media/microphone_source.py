@@ -112,7 +112,12 @@ class MicrophoneSource:
 
         self._microphone_thread = threading.Thread(target=self._listen)
         self._microphone_thread.daemon = True
-        self._microphone_thread.start()
+        try:
+            self._microphone_thread.start()
+        except BaseException:
+            self.running = False
+            self._input_stream.close()
+            raise
         logger.info(
             "Microphone source %s started at %s Hz",
             self._input_device["index"],

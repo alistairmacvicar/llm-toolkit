@@ -238,6 +238,11 @@ def _download_chunks(url: str, max_bytes: int, timeout: float) -> Iterator[bytes
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and greater than 0")
     with urlopen(url, timeout=timeout) as response:
+        # HTTPResponse tracks the declared length, accounting for chunked
+        # encoding. read(size) alone does not reject an early connection close.
+        expected = getattr(response, "length", None)
+        if isinstance(expected, int) and expected > max_bytes:
+            raise ValueError(f"Download exceeds max_bytes ({max_bytes})")
         total = 0
         while True:
             chunk = response.read(min(64 * 1024, max_bytes - total + 1))
@@ -247,6 +252,8 @@ def _download_chunks(url: str, max_bytes: int, timeout: float) -> Iterator[bytes
             if total > max_bytes:
                 raise ValueError(f"Download exceeds max_bytes ({max_bytes})")
             yield chunk
+        if isinstance(expected, int) and total != expected:
+            raise OSError(f"Incomplete download: expected {expected} bytes, received {total}")
 
 
 def load_link(url: str, *, max_bytes: int = DEFAULT_DOWNLOAD_LIMIT,

@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from copy import deepcopy
 from functools import wraps
 from time import perf_counter
@@ -18,27 +19,35 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _rollback_on_failure(method):
+@contextmanager
+def _conversation_transaction(director, *, preserve_decisions=True):
     """Restore conversation state, retaining diagnostics and billed token usage."""
+    agents = {id(agent): agent for agent in
+              [*director.agents.values(), *director.get_coordinators().values()]
+              if agent is not None}
+    histories = [(agent, agent.messages, deepcopy(agent.messages))
+                 for agent in agents.values()]
+    names = ["emotions", "reply_metadata", "public_transcript", "private_transcripts",
+             "_private_messages"]
+    if not preserve_decisions:
+        names.append("decisions")
+    state = {name: deepcopy(getattr(director, name)) for name in names}
+    try:
+        yield
+    except BaseException:
+        for agent, original, messages in histories:
+            original[:] = messages
+            agent.messages = original
+        for name, value in state.items():
+            setattr(director, name, value)
+        raise
+
+
+def _rollback_on_failure(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        agents = {id(agent): agent for agent in
-                  [*self.agents.values(), *self.get_coordinators().values()]
-                  if agent is not None}
-        histories = [(agent, agent.messages, deepcopy(agent.messages))
-                     for agent in agents.values()]
-        state = {name: deepcopy(getattr(self, name)) for name in
-                 ("emotions", "reply_metadata", "public_transcript", "private_transcripts",
-                  "_private_messages")}
-        try:
+        with _conversation_transaction(self):
             return method(self, *args, **kwargs)
-        except BaseException:
-            for agent, original, messages in histories:
-                original[:] = messages
-                agent.messages = original
-            for name, value in state.items():
-                setattr(self, name, value)
-            raise
     return wrapped
 
 

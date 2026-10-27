@@ -118,8 +118,10 @@ class ActionHandler:
                         self.input_buffer.stage("audio", audio)
 
     def quit(self):
-        self.stop()
-        self.action_handler.join()
+        try:
+            self.stop()
+        finally:
+            self.action_handler.join()
 
     def stop(self):
         if not self.running:
@@ -127,11 +129,19 @@ class ActionHandler:
 
         logger.info("Stopping action handler")
         self.running = False
-        self.action_handler.stop()
+        error = None
+        cleanup = [self.action_handler.stop]
         if self.microphone_source is not None:
-            self.microphone_source.quit()
+            cleanup.append(self.microphone_source.quit)
         if self.camera_source is not None:
-            self.camera_source.quit()
+            cleanup.append(self.camera_source.quit)
+        for close in cleanup:
+            try:
+                close()
+            except Exception as exc:
+                error = error or exc
+        if error is not None:
+            raise error
         logger.info("Action handler stopped")
 
     def _read_terminal_message(self):

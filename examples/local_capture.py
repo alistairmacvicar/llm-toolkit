@@ -1,4 +1,5 @@
 import argparse
+from contextlib import ExitStack
 
 from llm_toolkit import ActionHandler, Agent, configure_logging
 from llm_toolkit.media.camera_source import CameraSource
@@ -8,20 +9,24 @@ from _common import get_response_text
 
 
 def main(arguments):
-    camera = CameraSource(save_dir=arguments.save_dir) if arguments.camera else None
-    microphone = (
-        MicrophoneSource(save=arguments.save, save_dir=arguments.save_dir)
-        if arguments.microphone
-        else None
-    )
-    agent = Agent(model=arguments.model)
-    actions = ActionHandler(
-        camera_source=camera,
-        microphone_source=microphone,
-        auto_send=arguments.auto_send,
-    )
-
-    try:
+    with ExitStack() as resources:
+        camera = CameraSource(save_dir=arguments.save_dir) if arguments.camera else None
+        if camera is not None:
+            resources.callback(camera.quit)
+        microphone = (
+            MicrophoneSource(save=arguments.save, save_dir=arguments.save_dir)
+            if arguments.microphone
+            else None
+        )
+        if microphone is not None:
+            resources.callback(microphone.quit)
+        agent = Agent(model=arguments.model)
+        actions = ActionHandler(
+            camera_source=camera,
+            microphone_source=microphone,
+            auto_send=arguments.auto_send,
+        )
+        resources.callback(actions.quit)
         while actions.running:
             event = actions.get_event()
             if event["type"] == "send":
@@ -29,8 +34,6 @@ def main(arguments):
                 print(get_response_text(agent.get_response()))
             elif event["type"] == "quit":
                 break
-    finally:
-        actions.quit()
 
 
 if __name__ == "__main__":

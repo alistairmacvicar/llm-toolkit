@@ -29,6 +29,7 @@ It preserves an existing destination if downloading fails. Generated-image URL
 saves use the same streaming path; `generate_image()` accepts
 `download_max_bytes` and `download_timeout`. These limits do not cover media
 already returned in memory by a provider, local image/audio files, or recordings.
+HTTP responses that end before their declared content length are rejected.
 
 `Agent` accepts encoded audio files/bytes, base64 strings, and audio arrays.
 Arrays use 24 kHz. `RealtimeSession` takes raw mono PCM16 bytes or base64 PCM16;
@@ -75,6 +76,8 @@ Executable tool handlers must be registered again after restoration.
 `get_session()` returns an independent copy. `get_messages()` copies only the
 outer list; use the session snapshot if you need to modify nested messages safely.
 Temporary `context` is removed after the request, including after failure.
+Constructor inputs are copied recursively. Failed session updates preserve the
+existing session and registered handlers.
 
 ## Characters and a director
 
@@ -129,11 +132,23 @@ async def chat():
 `RealtimeEnsemble` adds cast routing and application callbacks for audio playback.
 Always call `await ensemble.close()` in a `finally` block. Hosts choose recording
 boundaries and must not automatically replay uncertain utterances after failure.
+Concurrent `connect()` calls wait for the same peer initialization. A failed
+final turn callback restores durable conversation state and disconnects the
+peers. Audio already played or events already delivered cannot be undone.
+`RealtimeSession.connected` becomes false after a remote WebSocket close;
+call `connect()` explicitly to establish a new connection without replaying data.
 
 `InputBuffer` stages inputs without hardware. `ActionHandler` starts a global
 keyboard listener; create it only in a desktop application. Call `quit()` on
 capture sources and action handlers to release their resources. `AudioOutput`
 opens the selected output device only during playback.
+PCM playback accepts samples split across chunks and writes at most 4,096 samples
+at a time. A trailing incomplete sample raises an error after cleanup.
+
+`CameraSource` raises if the device cannot open. Recording uses the dimensions of
+the current captured frame and falls back to 30 fps when device metadata is
+invalid. Closed sources reject snapshots, recording, and preview requests.
+Shutdown attempts to close all devices even if another device reports an error.
 
 `MicrophoneSource` monitoring uses one reusable output stream and a preallocated
 mono PCM buffer. `monitor_device` selects the output device;

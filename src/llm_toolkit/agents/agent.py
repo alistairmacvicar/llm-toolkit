@@ -51,14 +51,14 @@ class Agent:
     ):
         self.model = model
         self.modalities = list(dict.fromkeys(modalities or ["text"]))
-        self.audio = audio or {"voice": "alloy", "format": "wav"}
-        self.messages = list(messages or [])
+        self.audio = copy.deepcopy(audio or {"voice": "alloy", "format": "wav"})
+        self.messages = copy.deepcopy(list(messages or []))
         self.transcription_model = transcription_model
         self.transcription_enabled = transcription_enabled
         self.vision_fallback_model = vision_fallback_model
-        self.tools = list(tools or [])
+        self.tools = copy.deepcopy(list(tools or []))
         self.tool_handlers = dict(tool_handlers or {})
-        self.tool_choice = tool_choice
+        self.tool_choice = copy.deepcopy(tool_choice)
         self.system_prompt = system_prompt
         self.set_completion_options({} if completion_options is None else completion_options)
         self.token_usage: TokenUsage = {
@@ -141,7 +141,15 @@ class Agent:
             session (SessionData): Session values to apply.
         """
 
-        session = copy.deepcopy(session)
+        if not isinstance(session, dict):
+            raise ValueError("Session must be an object")
+        candidate = copy.copy(self)
+        candidate._apply_session(copy.deepcopy(session))
+        self.__dict__.update(candidate.__dict__)
+        logger.info("Agent session updated")
+
+    def _apply_session(self, session):
+        # Stage all conversions and capability checks before publishing state.
         options = session.get("completion_options", self.completion_options)
         self.validate_completion_options(options)
         self.model = session.get("model", self.model)
@@ -177,7 +185,6 @@ class Agent:
         self._model_support = {}
         self.input_modalities = ["text"]
         self._update_model_support()
-        logger.info("Agent session updated")
 
     def save_session(self, file_path: str) -> str:
         """
