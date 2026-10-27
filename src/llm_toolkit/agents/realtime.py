@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, final
@@ -14,6 +15,72 @@ logger = get_logger(__name__)
 
 @final
 class RealtimeSession:
+    @staticmethod
+    def create_openai_webrtc_answer(
+        offer_sdp: str,
+        *,
+        model: str,
+        instructions: str = "",
+        voice: str = "marin",
+        transcription_model: str = "gpt-4o-mini-transcribe",
+        api_key: str = None,
+        timeout: float = 30,
+    ) -> str:
+        """Exchange a browser's SDP offer for an OpenAI Realtime SDP answer.
+
+        Call on the application server. The standard API key stays on the
+        server; only the SDP answer is returned to the browser. Audio and
+        interruption handling then use WebRTC directly. This OpenAI-specific
+        helper is independent of the existing LiteLLM websocket connection.
+        No connection is created until this method is called.
+        """
+        import httpx
+
+        if not isinstance(offer_sdp, str) or not offer_sdp.startswith("v=0"):
+            raise ValueError("A valid SDP offer is required")
+        if len(offer_sdp) > 1_000_000:
+            raise ValueError("SDP offer is too large")
+        if not model.strip():
+            raise ValueError("A realtime model is required")
+        key = api_key or os.getenv("OPENAI_API_KEY")
+        if not key:
+            raise ValueError("Set OPENAI_API_KEY on the server to use live voice")
+        session = {
+            "type": "realtime",
+            "model": model,
+            "instructions": instructions,
+            "output_modalities": ["audio"],
+            "audio": {
+                "input": {
+                    "transcription": {"model": transcription_model},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "create_response": True,
+                        "interrupt_response": True,
+                    },
+                },
+                "output": {"voice": voice},
+            },
+        }
+        response = httpx.post(
+            "https://api.openai.com/v1/realtime/calls",
+            headers={"Authorization": f"Bearer {key}"},
+            files={
+                "sdp": (None, offer_sdp),
+                "session": (None, json.dumps(session), "application/json"),
+            },
+            timeout=timeout,
+        )
+        if not response.is_success:
+            # Do not include request headers or response bodies containing secrets.
+            raise RuntimeError(
+                f"Realtime connection failed (HTTP {response.status_code}). "
+                "Check the API key, model access, and account quota."
+            )
+        if not response.text.startswith("v=0"):
+            raise RuntimeError("Realtime provider did not return an SDP answer")
+        return response.text
+
     def __init__(
         self,
         url: str,
@@ -29,6 +96,7 @@ class RealtimeSession:
         self.sample_rate = sample_rate
         self._websocket_factory = websocket_factory
         self._websocket = None
+        self._connection_lock = asyncio.Lock()
 
         if api_key is not None:
             self.headers.setdefault("Authorization", f"Bearer {api_key}")
@@ -58,10 +126,13 @@ class RealtimeSession:
 
             websocket_factory = connect
 
-        self._websocket = await websocket_factory(
-            self.url,
-            additional_headers=self.headers,
-        )
+        async with self._connection_lock:
+            if self._websocket is not None:
+                return self
+            self._websocket = await websocket_factory(
+                self.url,
+                additional_headers=self.headers,
+            )
         logger.info("Realtime session connected to %s", self.url)
         return self
 
@@ -70,11 +141,11 @@ class RealtimeSession:
         Closes the realtime websocket.
         """
 
-        if self._websocket is None:
-            return
-
-        await self._websocket.close()
-        self._websocket = None
+        async with self._connection_lock:
+            websocket, self._websocket = self._websocket, None
+            if websocket is None:
+                return
+            await websocket.close()
         logger.info("Realtime session closed")
 
     async def __aenter__(self):
@@ -88,7 +159,7 @@ class RealtimeSession:
         Sends a raw client event to the realtime websocket.
 
         Args:
-            `event` (dict[str, Any]): Realtime client event.
+            event (dict[str, Any]): Realtime client event.
         """
 
         if self._websocket is None:
@@ -138,9 +209,9 @@ class RealtimeSession:
         Updates the active realtime session.
 
         Args:
-            `instructions` (str): Optional system instructions.
-            `output_modalities` (list[str]): Optional output modalities.
-            `options`: Additional realtime session options.
+            instructions (str): Optional system instructions.
+            output_modalities (list[str]): Optional output modalities.
+            options (Any): Additional realtime session options.
         """
 
         session = {"type": "realtime", **options}
@@ -156,8 +227,8 @@ class RealtimeSession:
         Sends a text message to the realtime conversation.
 
         Args:
-            `text` (str): Text to send.
-            `create_response` (bool): Whether to request a response immediately.
+            text (str): Text to send.
+            create_response (bool): Whether to request a response immediately.
         """
 
         await self._send_content([{"type": "input_text", "text": text}])
@@ -169,7 +240,7 @@ class RealtimeSession:
         Appends PCM16 audio to the realtime input buffer.
 
         Args:
-            `audio`: PCM16 bytes, a base64 string, an audio file, or an audio array.
+            audio (Any): PCM16 bytes, a base64 string, an audio file, or an audio array.
         """
 
         encoded_audio = self._prepare_audio(audio)
@@ -185,7 +256,7 @@ class RealtimeSession:
         Commits buffered audio to the realtime conversation.
 
         Args:
-            `create_response` (bool): Whether to request a response immediately.
+            create_response (bool): Whether to request a response immediately.
         """
 
         await self.send_event({"type": "input_audio_buffer.commit"})
@@ -197,8 +268,8 @@ class RealtimeSession:
         Sends an image to the realtime conversation.
 
         Args:
-            `image`: Image URL, data URL, or local image path.
-            `create_response` (bool): Whether to request a response immediately.
+            image (str | Path): Image URL, data URL, or local image path.
+            create_response (bool): Whether to request a response immediately.
         """
 
         image = self._prepare_image(image)
@@ -218,10 +289,10 @@ class RealtimeSession:
         Sends confirmed InputBuffer values to the realtime conversation.
 
         Args:
-            `inputs` (list[InputEvent]): Confirmed inputs to send.
-            `create_response` (bool): Whether to request a response after sending.
-            `video_sample_fps` (int): Number of video frames sampled per second.
-            `video_max_frames` (int): Maximum video frames sent as images.
+            inputs (list[InputEvent]): Confirmed inputs to send.
+            create_response (bool): Whether to request a response after sending.
+            video_sample_fps (int): Number of video frames sampled per second.
+            video_max_frames (int): Maximum video frames sent as images.
         """
 
         content = []
@@ -263,7 +334,7 @@ class RealtimeSession:
         Requests a response from the realtime model.
 
         Args:
-            `response_options`: Optional response configuration.
+            response_options (Any): Optional response configuration.
         """
 
         await self.send_event(
@@ -278,7 +349,7 @@ class RealtimeSession:
         Creates an ActionHandler callback that schedules realtime sends.
 
         Args:
-            `loop`: Event loop used to schedule sends. Defaults to the running loop.
+            loop (asyncio.AbstractEventLoop | None): Event loop used to schedule sends. Defaults to the running loop.
 
         Returns:
             Callable: Callback accepting confirmed InputBuffer values.
@@ -359,10 +430,17 @@ class RealtimeSession:
                     )
 
             audio_array = np.asarray(audio)
+            if audio_array.ndim not in (1, 2) or (audio_array.ndim == 2 and audio_array.shape[1] == 0):
+                raise ValueError("Audio must have shape (samples,) or (samples, channels)")
             if np.issubdtype(audio_array.dtype, np.integer):
-                audio_array = audio_array.astype(np.int16)
+                # Integer arrays are PCM16 sample values, even after downmixing.
+                if audio_array.ndim == 2:
+                    audio_array = audio_array.mean(axis=1)
+                audio_array = np.clip(audio_array, -32768, 32767).astype("<i2")
             else:
-                audio_array = (np.clip(audio_array, -1, 1) * 32767).astype(np.int16)
+                if audio_array.ndim == 2:
+                    audio_array = audio_array.mean(axis=1)
+                audio_array = (np.clip(audio_array, -1, 1) * 32767).astype("<i2")
             audio_bytes = audio_array.tobytes()
 
         return base64.b64encode(audio_bytes).decode("utf-8")

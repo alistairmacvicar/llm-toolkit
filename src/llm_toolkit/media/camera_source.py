@@ -78,6 +78,8 @@ class CameraSource:
         file_path = self._save_dir / f"camera_{timestamp}.jpg"
 
         with self._lock:
+            if not self.success or self._frame is None:
+                raise RuntimeError("No camera frame is available; check the device and camera permission")
             image = self._frame.copy()
             saved = cv2.imwrite(str(file_path), image)
 

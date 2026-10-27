@@ -10,6 +10,8 @@ from llm_toolkit.logging import configure_logging, get_logger
 __all__ = [
     "__version__",
     "Agent",
+    "AudioOutput",
+    "RealtimeEnsemble",
     "ActionHandler",
     "CharacterSheet",
     "Director",
@@ -21,6 +23,14 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    if name == "AudioOutput":
+        from llm_toolkit.media.audio_output import AudioOutput
+
+        return AudioOutput
+    if name == "RealtimeEnsemble":
+        from llm_toolkit.agents.realtime_ensemble import RealtimeEnsemble
+
+        return RealtimeEnsemble
     if name == "ActionHandler":
         from llm_toolkit.util.action_handler import ActionHandler
 

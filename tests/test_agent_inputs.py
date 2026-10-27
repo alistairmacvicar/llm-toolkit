@@ -1,5 +1,4 @@
 import base64
-import sys
 import tempfile
 import types
 import unittest
@@ -7,46 +6,42 @@ from pathlib import Path
 from unittest import mock
 
 
-if "litellm" not in sys.modules:
-    litellm = types.ModuleType("litellm")
-    litellm.completion = mock.Mock()
-    litellm.transcription = mock.Mock()
-    litellm.supports_audio_input = mock.Mock(return_value=True)
-    litellm.supports_audio_output = mock.Mock(return_value=False)
-    litellm.supports_vision = mock.Mock(return_value=True)
-    litellm.image_generation = mock.Mock()
-    litellm.speech = mock.Mock()
-    litellm.video_generation = mock.Mock()
-    litellm.video_status = mock.Mock()
-    litellm.video_content = mock.Mock()
-    litellm.utils = types.SimpleNamespace(
-        function_to_dict=mock.Mock(
-            side_effect=lambda function: {
-                "name": function.__name__,
-                "description": function.__doc__ or "",
-                "parameters": {"type": "object", "properties": {}},
-            }
-        )
-    )
-    sys.modules["litellm"] = litellm
-
-if "soundfile" not in sys.modules:
-    soundfile = types.ModuleType("soundfile")
-    soundfile.write = mock.Mock()
-    sys.modules["soundfile"] = soundfile
-
-if "cv2" not in sys.modules:
-    sys.modules["cv2"] = types.ModuleType("cv2")
-
 from llm_toolkit.agents import agent as agent_module
 from llm_toolkit.agents.agent import Agent
 
 
 class AgentInputTests(unittest.TestCase):
+    def test_generation_parameters_are_passed_and_session_copies_are_independent(self):
+        options = {"temperature": 0.3, "max_tokens": 120, "response_format": {"type": "json_object"}}
+        agent = Agent(completion_options=options)
+        options["response_format"]["type"] = "changed"
+        response = types.SimpleNamespace(choices=[types.SimpleNamespace(message={"role": "assistant", "content": "{}"})], usage=None)
+        with mock.patch.object(agent_module, "completion", return_value=response) as request:
+            agent.get_response()
+        self.assertEqual(request.call_args.kwargs["temperature"], 0.3)
+        self.assertEqual(request.call_args.kwargs["response_format"], {"type": "json_object"})
+        restored = Agent()
+        restored.set_session(agent.get_session())
+        agent.completion_options["max_tokens"] = 999
+        self.assertEqual(restored.completion_options["max_tokens"], 120)
+
+    def test_generation_parameters_cannot_override_routing_or_stream(self):
+        for options in ({"messages": []}, {"stream": True}, {"api_key": "secret"}, {"temperature": float("nan")}, []):
+            with self.subTest(options=options):
+                with self.assertRaises(ValueError):
+                    Agent.validate_completion_options(options)
+
     def setUp(self):
-        agent_module.litellm.supports_audio_input.return_value = True
-        agent_module.litellm.supports_audio_output.return_value = False
-        agent_module.litellm.supports_vision.return_value = True
+        # Another suite may already have imported real LiteLLM. Patch per test
+        # instead of relying on the import-time stand-in or collection order.
+        for name, supported in (("supports_audio_input", True), ("supports_audio_output", False), ("supports_vision", True)):
+            patcher = mock.patch.object(agent_module.litellm, name, return_value=supported)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name in ("completion", "transcription"):
+            patcher = mock.patch.object(agent_module, name, side_effect=AssertionError("Unexpected provider call in an offline test"))
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_input_and_output_modalities_are_tracked_separately(self):
         agent = Agent(modalities=["text", "audio"])
@@ -89,6 +84,25 @@ class AgentInputTests(unittest.TestCase):
         audio = agent.messages[0]["content"][0]["input_audio"]
         self.assertEqual(audio["data"], base64.b64encode(b"wav data").decode("utf-8"))
         self.assertEqual(audio["format"], "wav")
+
+    def test_transcribe_audio_returns_text_without_mutating_history(self):
+        agent = Agent()
+        agent.send_text("Existing history")
+        before = agent.get_messages()
+        with mock.patch.object(agent_module, "transcription", return_value={"text": "Hello"}) as transcribe:
+            text = agent.transcribe_audio(b"audio", model="test/transcribe", format="webm", language="en")
+        self.assertEqual(text, "Hello")
+        self.assertEqual(agent.get_messages(), before)
+        self.assertEqual(transcribe.call_args.kwargs["model"], "test/transcribe")
+        self.assertEqual(transcribe.call_args.kwargs["file"].name, "audio.webm")
+        self.assertEqual(transcribe.call_args.kwargs["language"], "en")
+
+    def test_transcription_error_leaves_history_unchanged(self):
+        agent = Agent()
+        with mock.patch.object(agent_module, "transcription", side_effect=RuntimeError("Failed")):
+            with self.assertRaises(RuntimeError):
+                agent.transcribe_audio(b"audio")
+        self.assertEqual(agent.get_messages(), [])
 
     def test_enabled_transcription_sends_text(self):
         agent = Agent(transcription_enabled=True)

@@ -62,10 +62,10 @@ class MicrophoneSource:
 
     def _get_input_source(self, source: int = -1):
         # Return the default input device set in the OS if the user hasn't chosen a specific one
-        if source == -1:
-            return sd.get_devices(kind="input")
-        else:
-            return sd.get_devices(device=source)
+        index = int(sd.default.device[0]) if source == -1 else source
+        device = dict(sd.query_devices(device=index, kind="input"))
+        device["index"] = index
+        return device
 
     def toggle_monitor(self):
         with self._lock:
@@ -90,6 +90,8 @@ class MicrophoneSource:
 
     def start_recording(self):
         with self._lock:
+            self.last_recording = None
+            self.last_recording_path = None
             self._recording = True
             if not self._input_stream.active:
                 self._input_stream.start()

@@ -1,7 +1,14 @@
 import json
+from copy import deepcopy
+from time import perf_counter
 from typing import TYPE_CHECKING, final
 
 from llm_toolkit.agents.character import CharacterSheet
+from llm_toolkit.agents.hierarchy import validate_hierarchy
+from llm_toolkit.agents.turn_policy import (
+    CONVERSATION_GROUNDING, EMOTIONS, decision_schema, eligible_children,
+    turn_instructions, validate_decision,
+)
 from llm_toolkit.logging import get_logger
 
 if TYPE_CHECKING:
@@ -29,6 +36,17 @@ class Director:
         self.character_sheets: dict[str, CharacterSheet] = {}
         self.public_transcript: list[dict[str, str]] = []
         self.private_transcripts: dict[str, list[dict[str, str]]] = {}
+        self.decisions: list[dict] = []
+        self.hierarchy: dict[str, list[str]] = {}
+        self.coordinators: dict[str, "Agent"] = {}
+        self.root = "Director"
+        self.optional_replies = False
+        self.avoid_repeat = False
+        self.structured_output = False
+        self.emotions: dict[str, str] = {}
+        self.reply_metadata: list[dict] = []
+        self.public_memory = ""
+        self.context_start = 0
 
         logger.info("Director initialized with %s agents", len(self.agents))
 
@@ -37,18 +55,41 @@ class Director:
         Sets the agent used to coordinate character conversations.
 
         Args:
-            `agent` (Agent): Agent that selects speakers and gives direction.
+            agent (Agent): Agent that selects speakers and gives direction.
         """
 
         self.director_agent = agent
+        if self.hierarchy:
+            self.coordinators[self.root] = agent
         logger.info("Director coordinator agent updated")
+
+    def set_hierarchy(self, children, coordinators, root="Director"):
+        """Configure a tree. Each speaking turn follows one path to a character.
+
+        All cast members still hear the public conversation. A subdirector is a
+        routing decision, not an isolated room. Validation happens before mutation.
+        """
+        validate_hierarchy(children, root, self.agents)
+        if set(coordinators) != set(children) or any(a is None for a in coordinators.values()):
+            raise ValueError("Provide one coordinator agent for every director")
+        self.hierarchy = deepcopy(children)
+        self.coordinators = dict(coordinators)
+        self.root = root
+        self.director_agent = self.coordinators[root]
+
+    def get_coordinators(self):
+        return dict(self.coordinators) if self.hierarchy else {self.root: self.director_agent}
+
+    def get_decisions(self):
+        """Decision explanations and request diagnostics, including failed attempts."""
+        return deepcopy(self.decisions)
 
     def set_ai_turns(self, ai_turns: int):
         """
         Sets the number of AI turns generated after each public user turn.
 
         Args:
-            `ai_turns` (int): Number of AI speaking turns.
+            ai_turns (int): Number of AI speaking turns.
         """
 
         if ai_turns <= 0:
@@ -62,8 +103,8 @@ class Director:
         Adds an agent to the director.
 
         Args:
-            `name` (str): Name used to reference the agent.
-            `agent` (Agent): Agent to add.
+            name (str): Name used to reference the agent.
+            agent (Agent): Agent to add.
         """
 
         self.agents[name] = agent
@@ -80,10 +121,10 @@ class Director:
         Creates an agent from a character sheet and adds it to the director.
 
         Args:
-            `character` (CharacterSheet): Character sheet used for the agent.
-            `model` (str): Model used by the agent. Defaults to gpt-5.
-            `name` (str): Optional director name. Defaults to the character name.
-            `agent_options`: Additional options passed to Agent.
+            character (CharacterSheet): Character sheet used for the agent.
+            model (str): Model used by the agent. Defaults to gpt-5.
+            name (str): Optional director name. Defaults to the character name.
+            agent_options (Any): Additional options passed to Agent.
 
         Returns:
             Agent: The created agent.
@@ -106,7 +147,7 @@ class Director:
         Removes an agent from the director.
 
         Args:
-            `name` (str): Name of the agent to remove.
+            name (str): Name of the agent to remove.
         """
 
         del self.agents[name]
@@ -124,9 +165,9 @@ class Director:
         Runs a public user turn that every agent can hear.
 
         Args:
-            `message` (str): User message shared with every agent.
-            `target` (str): Optional agent the user addressed directly.
-            `ai_turns` (int): Optional AI turn override for this user turn.
+            message (str): User message shared with every agent.
+            target (str): Optional agent the user addressed directly.
+            ai_turns (int): Optional AI turn override for this user turn.
 
         Returns:
             list[dict[str, str]]: AI responses selected by the director agent.
@@ -149,6 +190,7 @@ class Director:
             opening_message,
             turns=turn_count,
             context=context,
+            target=target,
         )
 
         self.public_transcript.append(
@@ -178,8 +220,8 @@ class Director:
         Runs a private one-to-one turn between the user and one agent.
 
         Args:
-            `name` (str): Name of the agent receiving the private message.
-            `message` (str): Private user message.
+            name (str): Name of the agent receiving the private message.
+            message (str): Private user message.
 
         Returns:
             str: The agent's private response.
@@ -215,7 +257,7 @@ class Director:
         Gets the private conversation transcript for one agent.
 
         Args:
-            `name` (str): Name of the private conversation agent.
+            name (str): Name of the private conversation agent.
 
         Returns:
             list[dict[str, str]]: Copies of private conversation entries.
@@ -234,23 +276,48 @@ class Director:
 
         history = [
             f"{entry['speaker']} to {entry['target']}: {entry['content']}"
-            for entry in self.public_transcript
+            for entry in self.public_transcript[self.context_start:]
         ]
         target_instruction = (
             f"The user directly addressed {target}. For the first AI turn, you must "
             f"select {target}. Select later speakers according to the conversation."
             if target is not None
-            else "The user addressed the full group."
+            else "No first recipient is enforced by the application. Infer the addressee and "
+                 "requested speaker scope from the participant's words; public delivery does "
+                 "not imply that everyone is invited to reply."
+        )
+        budget = (
+            f"Up to {ai_turns} character replies are permitted; ending early is enabled. "
+            if self.optional_replies else f"Generate {ai_turns} total AI speaking turns, unless no eligible characters remain. "
         )
         return (
-            f"Generate {ai_turns} total AI speaking turns for this user turn. "
-            "Characters may respond to the user or to another character. Avoid choosing "
+            budget + "Characters may respond to the user or to another character. Avoid choosing "
             "a speaker who has nothing new to add.\n\n"
             f"{target_instruction}\n\n"
-            "Character sheets:\n"
+            + CONVERSATION_GROUNDING + "\n\nCharacter sheets:\n"
             + "\n\n---\n\n".join(cast)
             + "\n\nPublic conversation so far:\n"
+            + (self.public_memory + "\n" if self.public_memory else "")
             + ("\n".join(history) if history else "No earlier public turns.")
+        )
+
+    def public_reply_context(self, opening_message, replies):
+        """Give a public speaker a factual scope without exposing any private history."""
+        return (
+            "Public reply context (recorded dialogue, not fictional scene background):\n"
+            + json.dumps({
+                "earlier_public_summary": self.public_memory,
+                "earlier_public_dialogue": [
+                    {"speaker": entry["speaker"], "content": entry["content"]}
+                    for entry in self.public_transcript[self.context_start:]
+                ],
+                "current_user_message": opening_message,
+                "replies_to_current_message": [
+                    {"speaker": reply["speaker"], "content": reply["content"]}
+                    for reply in replies
+                ],
+            }, ensure_ascii=False)
+            + "\n" + CONVERSATION_GROUNDING
         )
 
     def send_text(self, name: str, text: str):
@@ -258,8 +325,8 @@ class Director:
         Sends a text message to one agent.
 
         Args:
-            `name` (str): Name of the agent to message.
-            `text` (str): Text to send.
+            name (str): Name of the agent to message.
+            text (str): Text to send.
         """
 
         self.agents[name].send_text(text)
@@ -270,9 +337,9 @@ class Director:
         Sends a private text message between agents.
 
         Args:
-            `from_agent` (str): Name of the sending agent.
-            `to_agent` (str): Name of the receiving agent.
-            `text` (str): Text to send.
+            from_agent (str): Name of the sending agent.
+            to_agent (str): Name of the receiving agent.
+            text (str): Text to send.
         """
 
         message = f"{from_agent}: {text}"
@@ -284,8 +351,8 @@ class Director:
         Sends one agent's message to every other agent.
 
         Args:
-            `from_agent` (str): Name of the speaking agent.
-            `text` (str): Text to send.
+            from_agent (str): Name of the speaking agent.
+            text (str): Text to send.
         """
 
         for name, agent in self.agents.items():
@@ -299,7 +366,7 @@ class Director:
         Sends a text message to every agent.
 
         Args:
-            `text` (str): Text to send.
+            text (str): Text to send.
         """
 
         for agent in self.agents.values():
@@ -307,19 +374,19 @@ class Director:
 
         logger.debug("Broadcast text message to %s agents", len(self.agents))
 
-    def speak(self, name: str, listeners: list[str] = None):
+    def speak(self, name: str, listeners: list[str] = None, *, context=None):
         """
         Gets one agent response and sends it to selected listeners.
 
         Args:
-            `name` (str): Name of the speaking agent.
-            `listeners` (list[str]): Optional listener names. Defaults to every other agent.
+            name (str): Name of the speaking agent.
+            listeners (list[str]): Optional listener names. Defaults to every other agent.
 
         Returns:
             str: The speaking agent's response text.
         """
 
-        response = self.get_response(name)
+        response = self.get_response(name, context=context)
         response_text = self._get_response_text(response)
         listener_names = listeners
 
@@ -344,9 +411,9 @@ class Director:
         Runs a bounded conversation between a sequence of agents.
 
         Args:
-            `speakers` (list[str]): Agent names in speaking order.
-            `opening_message` (str): Message used to begin the conversation.
-            `rounds` (int): Number of turns each agent receives. Defaults to 1.
+            speakers (list[str]): Agent names in speaking order.
+            opening_message (str): Message used to begin the conversation.
+            rounds (int): Number of turns each agent receives. Defaults to 1.
 
         Returns:
             list[dict[str, str]]: Conversation entries with speaker and content.
@@ -379,15 +446,16 @@ class Director:
         opening_message: str,
         turns: int = 4,
         context: str = None,
+        target: str = None,
     ) -> list[dict[str, str]]:
         """
         Runs a conversation with speaker selection managed by a director agent.
 
         Args:
-            `speakers` (list[str]): Agent names available to the director agent.
-            `opening_message` (str): Message used to begin the conversation.
-            `turns` (int): Maximum number of character turns. Defaults to 4.
-            `context` (str): Optional context supplied to the director agent.
+            speakers (list[str]): Agent names available to the director agent.
+            opening_message (str): Message used to begin the conversation.
+            turns (int): Maximum number of character turns. Defaults to 4.
+            context (str): Optional context supplied to the director agent.
 
         Returns:
             list[dict[str, str]]: Generated conversation entries.
@@ -399,41 +467,78 @@ class Director:
             raise ValueError("At least one speaker is required")
         if turns <= 0:
             raise ValueError("turns must be greater than 0")
+        if target is not None and target not in speakers:
+            raise ValueError(f"Unknown target: {target}")
 
         missing_speakers = [name for name in speakers if name not in self.agents]
         if missing_speakers:
             raise ValueError(f"Unknown speakers: {', '.join(missing_speakers)}")
+        if self.hierarchy:
+            validate_hierarchy(self.hierarchy, self.root, self.agents)
+            if set(speakers) != set(self.agents):
+                raise ValueError("Hierarchical coordination requires the complete cast")
 
         for speaker in speakers:
             self.agents[speaker].send_text(opening_message)
 
         transcript = []
+        self.reply_metadata = []
+        # Retain caller-supplied context (including images) across decisions, but
+        # do not repeatedly feed prior routing prompts and model directions back.
+        request_messages = {
+            name: deepcopy(agent.messages) for name, agent in self.get_coordinators().items()
+        }
 
         for turn_index in range(turns):
-            prompt = self._get_director_prompt(
-                speakers,
-                opening_message,
-                transcript,
-                turn_index + 1,
-                turns,
-                context,
-            )
-            self.director_agent.send_text(prompt)
-            decision = self._parse_director_decision(
-                self._get_response_text(self.director_agent.get_response())
-            )
-            speaker = decision.get("speaker")
-
-            if speaker not in speakers:
-                raise ValueError(f"Director selected unknown speaker: {speaker}")
-
-            instruction = decision.get("instruction")
-            if instruction:
-                self.agents[speaker].send_text(f"Director: {instruction}")
+            node = self.root
+            instructions = []
+            while True:
+                candidates = eligible_children(
+                    self.hierarchy, node, speakers,
+                    excluded=[r["speaker"] for r in transcript] if self.avoid_repeat else [],
+                    target=target if turn_index == 0 else None,
+                )
+                if not candidates:
+                    break
+                agent = self.get_coordinators()[node]
+                routing = ""
+                if self.hierarchy:
+                    routing = "\n\nDirector tree (select an immediate child; a subdirector will delegate):\n"
+                    routing += json.dumps(self.hierarchy, ensure_ascii=False)
+                    routing += f"\nYou are {node}."
+                    roles = [f"{child}: {getattr(self.coordinators[child], 'system_prompt', '')}"
+                             for child in candidates if child in self.coordinators]
+                    if roles:
+                        routing += "\nChild director roles:\n" + "\n".join(roles)
+                if instructions:
+                    routing += "\nParent direction:\n" + "\n".join(instructions)
+                prompt = self._get_director_prompt(
+                    candidates, opening_message, transcript, turn_index + 1, turns,
+                    (context or "") + routing,
+                )
+                allow_stop = self.optional_replies and turn_index > 0
+                decision = self._decide(node, agent, candidates, prompt, turn_index + 1,
+                                        allow_stop=allow_stop, request_messages=request_messages[node])
+                speaker = decision["speaker"]
+                if speaker is None:
+                    break
+                if decision.get("instruction"):
+                    instructions.append(f"{node}: {decision['instruction']}")
+                if speaker not in self.hierarchy:
+                    break
+                node = speaker
+            if not candidates or speaker is None:
+                break
+            self.emotions[speaker] = decision["emotion"]
+            self.reply_metadata.append({"speaker": speaker, "emotion": decision["emotion"], "instruction": decision["instruction"]})
+            if decision["emotion"] != "neutral":
+                instructions.append(f"Direction: express {decision['emotion']} naturally; do not label the emotion in your dialogue.")
+            instructions.append(self.public_reply_context(opening_message, transcript))
 
             content = self.speak(
                 speaker,
                 listeners=[name for name in speakers if name != speaker],
+                context="\n\n".join(instructions),
             )
             transcript.append({"speaker": speaker, "content": content})
 
@@ -442,6 +547,43 @@ class Director:
             turns,
         )
         return transcript
+
+    def _decide(self, name, agent, candidates, prompt, turn, *, allow_stop=False, request_messages=None):
+        started = perf_counter()
+        usage = dict(getattr(agent, "token_usage", {}))
+        trace = {
+            "director": name, "turn": turn, "candidates": list(candidates),
+            "model": getattr(agent, "model", ""), "prompt": prompt,
+            "system_prompt": getattr(agent, "system_prompt", ""),
+            "completion_options": deepcopy(getattr(agent, "completion_options", {})),
+            "status": "pending",
+        }
+        self.decisions.append(trace)
+        try:
+            if request_messages is not None:
+                agent.messages = deepcopy(request_messages)
+            agent.send_text(prompt)
+            trace["messages"] = deepcopy(getattr(agent, "messages", []))
+            if self.structured_output:
+                response_format = {"type": "json_schema", "json_schema": {
+                    "name": "director_decision", "strict": True,
+                    "schema": decision_schema(candidates, allow_stop=allow_stop),
+                }}
+                trace["response_format"] = response_format
+                response = agent.get_response(response_format=response_format)
+            else:
+                response = agent.get_response()
+            raw = self._get_response_text(response)
+            trace["response"] = raw
+            decision = validate_decision(self._parse_director_decision(raw), candidates, allow_stop=allow_stop)
+            trace.update(decision=decision, status="complete")
+            return decision
+        except Exception as exc:
+            trace.update(status="error", error=str(exc))
+            raise
+        finally:
+            trace["elapsed_seconds"] = round(perf_counter() - started, 4)
+            trace["token_usage"] = {k: v - usage.get(k, 0) for k, v in getattr(agent, "token_usage", {}).items()}
 
     def _get_director_prompt(
         self,
@@ -457,18 +599,25 @@ class Director:
             f"{entry['speaker']}: {entry['content']}" for entry in transcript
         )
         prompt = (
-            "Select the next speaker and give them a brief private instruction. "
-            "Return only a JSON object with string fields named speaker and instruction.\n\n"
-            f"Available speakers: {', '.join(speakers)}\n\n"
-            f"Turn: {turn_number} of {total_turns}\n\n"
-            "Conversation:\n"
-            + "\n".join(conversation)
+            "Decide the next action for the current user turn. If continuing, select "
+            "a speaker and give them a brief private instruction. "
+            "Return only a JSON object with fields named speaker, instruction, reason, and emotion. "
+            f"Emotion must be one of: {', '.join(EMOTIONS)}. "
+            "The reason is a brief explanation of the selection for the operator, not private reasoning."
         )
 
         if context:
             prompt += f"\n\nContext:\n{context}"
 
-        return prompt
+        # Put actual current dialogue after the potentially long fictional sheets
+        # so scene background cannot be mistaken for the latest exchange.
+        prompt += (f"\n\nAvailable speakers: {', '.join(speakers)}"
+                   f"\nReply slot: {turn_number}; maximum slots: {total_turns}"
+                   "\n\nRecorded conversation for the current user turn:\n"
+                   + "\n".join(conversation))
+        return prompt + "\n\nCurrent routing decision:\n" + turn_instructions(
+            total_turns, turn_number - 1, optional_replies=self.optional_replies,
+        )
 
     def _parse_director_decision(self, response_text: str) -> dict[str, str]:
         start = response_text.find("{")
@@ -481,19 +630,19 @@ class Director:
             raise ValueError("Director response must be a JSON object")
         return decision
 
-    def get_response(self, name: str):
+    def get_response(self, name: str, *, context=None):
         """
         Gets a response from one agent.
 
         Args:
-            `name` (str): Name of the agent to query.
+            name (str): Name of the agent to query.
 
         Returns:
-            The model response.
+            Any: The model response.
         """
 
         logger.info("Getting response from agent %s", name)
-        return self.agents[name].get_response()
+        return self.agents[name].get_response(**({"context": context} if context is not None else {}))
 
     def get_responses(self):
         """

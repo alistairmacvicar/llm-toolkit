@@ -34,6 +34,21 @@ class CharacterSheetTests(unittest.TestCase):
 
 
 class DirectorTests(unittest.TestCase):
+    def test_hierarchy_delegates_only_to_children_and_returns_a_character(self):
+        root = FakeAgent('{"speaker":"Sub","instruction":"Keep it brief","reason":"Their specialty"}')
+        sub = FakeAgent('{"speaker":"Ada","reason":"Addressed by name"}')
+        cast = {"Ada": FakeAgent("Hello"), "Lin": FakeAgent("Hi")}
+        director = Director(cast)
+        director.set_hierarchy({"Lead": ["Sub", "Lin"], "Sub": ["Ada"]}, {"Lead": root, "Sub": sub}, root="Lead")
+        result = director.public_turn("Ada?", ai_turns=1)
+        self.assertEqual(result, [{"speaker": "Ada", "content": "Hello"}])
+        self.assertEqual([d["director"] for d in director.get_decisions()], ["Lead", "Sub"])
+        self.assertIn("Parent direction:", sub.messages[0])
+        self.assertIn("Ada: Hello", cast["Lin"].messages)
+        with self.assertRaises(ValueError):
+            director.set_hierarchy({"Lead": ["Sub"], "Sub": ["Lead", "Ada", "Lin"]}, {"Lead": root, "Sub": sub}, root="Lead")
+        self.assertEqual(director.hierarchy["Sub"], ["Ada"])
+
     def test_director_routes_messages_without_loading_model_dependencies(self):
         first = FakeAgent("first response")
         second = FakeAgent("second response")
@@ -100,17 +115,18 @@ class DirectorTests(unittest.TestCase):
                 {"speaker": "second", "content": "second response"},
             ],
         )
-        self.assertIn("Director: Open the debate.", first.messages)
-        self.assertIn("Director: Challenge that claim.", second.messages)
-        self.assertEqual(len(coordinator.messages), 2)
-        self.assertIn("Turn: 1 of 2", coordinator.messages[0])
+        self.assertIn("Director: Open the debate.", first.contexts[-1])
+        self.assertIn("Director: Challenge that claim.", second.contexts[-1])
+        self.assertEqual(len(coordinator.messages), 1)
+        self.assertEqual(len(director.get_decisions()), 2)
+        self.assertIn("Reply slot: 1; maximum slots: 2", director.get_decisions()[0]["prompt"])
         self.assertIn("The user addressed first directly.", coordinator.messages[0])
 
     def test_public_turn_is_overheard_and_respects_configured_turns(self):
         first = FakeAgent("first response")
         second = FakeAgent("second response")
         coordinator = FakeAgent(
-            '{"speaker": "first", "instruction": "Respond to second."}'
+            '{"speaker": "second", "instruction": "Respond to the user."}'
         )
         director = Director(
             {"first": first, "second": second},
@@ -131,11 +147,11 @@ class DirectorTests(unittest.TestCase):
 
         self.assertEqual(
             responses,
-            [{"speaker": "first", "content": "first response"}],
+            [{"speaker": "second", "content": "second response"}],
         )
         self.assertIn("User to second: What do you think?", first.messages)
         self.assertIn("User to second: What do you think?", second.messages)
-        self.assertIn("first: first response", second.messages)
+        self.assertIn("second: second response", first.messages)
         self.assertIn("You are First Character.", coordinator.messages[0])
         self.assertIn("Generate 1 total AI speaking turns", coordinator.messages[0])
         self.assertIn("you must select second", coordinator.messages[0])
@@ -169,11 +185,13 @@ class FakeAgent:
         self.response = response
         self.messages = []
         self.response_index = 0
+        self.contexts = []
 
     def send_text(self, text):
         self.messages.append(text)
 
-    def get_response(self):
+    def get_response(self, *, context=None):
+        self.contexts.append(context)
         if isinstance(self.response, list):
             response = self.response[self.response_index]
             self.response_index += 1

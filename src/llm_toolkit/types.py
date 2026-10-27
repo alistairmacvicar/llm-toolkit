@@ -38,6 +38,7 @@ class TokenUsage(TypedDict, total=False):
 
 
 class SessionData(TypedDict, total=False):
+    completion_options: dict[str, Any]
     model: str
     modalities: list[str]
     audio: dict[str, Any]

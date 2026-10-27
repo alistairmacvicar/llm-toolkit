@@ -1,0 +1,6 @@
+/* Keep long generated signatures readable on narrow screens. */
+.doc-signature pre,
+.doc-signature pre code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

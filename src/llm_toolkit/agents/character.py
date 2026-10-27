@@ -59,7 +59,7 @@ class CharacterSheet:
         Creates a character sheet from a dictionary.
 
         Args:
-            `character` (dict[str, Any]): Character sheet fields.
+            character (dict[str, Any]): Character sheet fields.
 
         Returns:
             CharacterSheet: The created character sheet.

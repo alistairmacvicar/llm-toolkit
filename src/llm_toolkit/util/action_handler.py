@@ -9,8 +9,6 @@ from llm_toolkit.media.microphone_source import MicrophoneSource
 from llm_toolkit.types import ActionEvent, InputEvent
 from llm_toolkit.util.input_buffer import InputBuffer
 
-from pynput import keyboard
-
 logger = get_logger(__name__)
 
 
@@ -23,6 +21,8 @@ class ActionHandler:
         auto_send: bool = False,
         send_handler: Callable[[list[InputEvent]], Any] = None,
     ):
+        from pynput import keyboard
+
         self.camera_source = camera_source
         self.microphone_source = microphone_source
         self.messages = queue.Queue()
@@ -32,6 +32,8 @@ class ActionHandler:
         )
         self.events = self.input_buffer.events
         self.running = True
+        self._pressed_keys = set()
+        self._reading_terminal = False
 
         self.push_to_talk_key = keyboard.KeyCode.from_char("a")  # (a)udio
         self.type_message_key = keyboard.KeyCode.from_char("t")  # (t)ext
@@ -51,6 +53,9 @@ class ActionHandler:
         logger.info("Action handler started")
 
     def _on_press(self, key):
+        if not self.running or self._reading_terminal or key in self._pressed_keys:
+            return
+        self._pressed_keys.add(key)
         match key:
             case self.push_to_talk_key:
                 if self.microphone_source is not None:
@@ -58,6 +63,7 @@ class ActionHandler:
                     self.microphone_source.start_recording()
             case self.type_message_key:
                 logger.debug("Terminal message input requested")
+                self._reading_terminal = True
                 threading.Thread(target=self._read_terminal_message, daemon=True).start()
             case self.monitor_audio_key:
                 if self.microphone_source is not None:
@@ -99,6 +105,10 @@ class ActionHandler:
                 self.input_buffer.discard()
 
     def _on_release(self, key):
+        was_pressed = key in self._pressed_keys
+        self._pressed_keys.discard(key)
+        if not self.running or not was_pressed:
+            return
         match key:
             case self.push_to_talk_key:
                 if self.microphone_source is not None:
@@ -125,11 +135,17 @@ class ActionHandler:
         logger.info("Action handler stopped")
 
     def _read_terminal_message(self):
-        message = input("Message: ")
-        if message:
-            self.messages.put(message)
-            self.input_buffer.stage("text", message)
-            logger.info("Terminal message queued")
+        try:
+            message = input("Message: ")
+            if message:
+                self.messages.put(message)
+                self.input_buffer.stage("text", message)
+                logger.info("Terminal message queued")
+        except EOFError:
+            self.events.put({"type": "quit", "value": None})
+            self.stop()
+        finally:
+            self._reading_terminal = False
 
     def get_pending_inputs(self) -> list[InputEvent]:
         """
@@ -146,7 +162,7 @@ class ActionHandler:
         Updates whether captured inputs are sent immediately.
 
         Args:
-            `auto_send` (bool): Whether to automatically send captured inputs.
+            auto_send (bool): Whether to automatically send captured inputs.
         """
 
         self.input_buffer.set_auto_send(auto_send)
@@ -156,8 +172,8 @@ class ActionHandler:
         Gets the next queued action event.
 
         Args:
-            `block` (bool): Whether to wait for an event. Defaults to True.
-            `timeout` (float): How long to wait for an event. Defaults to None.
+            block (bool): Whether to wait for an event. Defaults to True.
+            timeout (float): How long to wait for an event. Defaults to None.
 
         Returns:
             ActionEvent: The next queued event.

@@ -9,6 +9,7 @@ description = "Python package to make building LLM apps easier."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "httpx>=0.27",
     "litellm",
     "numpydoc",
     "numpy",
@@ -16,8 +17,19 @@ dependencies = [
     "pynput",
     "sounddevice",
     "soundfile",
-    "websockets",
+    "websockets>=13",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "build>=1,<2"]
+
+[project.urls]
+Repository = "https://github.com/alistairmacvicar/llm-toolkit"
+Documentation = "https://alistairmacvicar.github.io/llm-toolkit/"
+Issues = "https://github.com/alistairmacvicar/llm-toolkit/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.dynamic]
 version = {attr = "llm_toolkit.__about__.__version__"}

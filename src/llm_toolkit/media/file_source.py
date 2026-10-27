@@ -1,4 +1,5 @@
 import base64
+import math
 import mimetypes
 import os.path
 from pathlib import Path
@@ -17,7 +18,7 @@ def _get_absolute_path(file_path: str) -> str:
     Gets the absolute path of a file.
 
     Args:
-        `file_path` (str): Path to the file (relative or absolute).
+        file_path (str): Path to the file (relative or absolute).
 
     Returns:
         str: The absolute path of the original file.
@@ -31,8 +32,8 @@ def _encode_file(file_path: str, format: str = "utf-8") -> str:
     Encodes a file as a base64 string.
 
     Args:
-        `file_path` (str): Path to the file (absolute).
-        `format` (str): Character encoding format. Defaults to UTF-8.
+        file_path (str): Path to the file (absolute).
+        format (str): Character encoding format. Defaults to UTF-8.
 
     Returns:
         str: A base64 encoded string of the file.
@@ -60,40 +61,38 @@ def _sample_frames(file_path: str, sample_fps: int) -> list[Any]:
     Samples frames from a video at a specified fps as a list of JPEG images.
 
     Args:
-        `file_path` (str): Path to the file (absolute).
-        `sample_fps` (int): How many frames to sample from the video every second.
+        file_path (str): Path to the file (absolute).
+        sample_fps (int): How many frames to sample from the video every second.
 
     Returns:
         `list[np.ndarray[int]]`: A list of sampled frames from `video_path` as JPEG images.
     """
 
-    if sample_fps <= 0:
+    if not math.isfinite(sample_fps) or sample_fps <= 0:
         raise ValueError("sample_fps must be greater than 0")
 
     cap = cv2.VideoCapture(file_path)
-    if not cap.isOpened():
-        raise ValueError(f"Unable to open video file: {file_path}")
-
     frames: list[Any] = []
-
-    total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    video_fps = cap.get(cv2.CAP_PROP_FPS) or sample_fps
-    sample_interval = max(1, round(video_fps / sample_fps))
-
-    success, frame = cap.read()
-    current_frame = 1
-
-    while current_frame <= total_video_frames and success:
-        if current_frame % sample_interval == 0:
-            success_encode, frame_jpg = cv2.imencode(".jpg", frame)
-            if not success_encode:
-                raise ValueError(f"Unable to encode frame {current_frame} from {file_path}")
-            frames.append(frame_jpg)
-
-        success, frame = cap.read()
-        current_frame += 1
-
-    cap.release()
+    try:
+        if not cap.isOpened():
+            raise ValueError(f"Unable to open video file: {file_path}")
+        video_fps = cap.get(cv2.CAP_PROP_FPS)
+        if not math.isfinite(video_fps) or video_fps <= 0:
+            video_fps = sample_fps
+        sample_interval = max(1, round(video_fps / sample_fps))
+        current_frame = 0
+        while True:
+            success, frame = cap.read()
+            if not success:
+                break
+            if current_frame % sample_interval == 0:
+                success_encode, frame_jpg = cv2.imencode(".jpg", frame)
+                if not success_encode:
+                    raise ValueError(f"Unable to encode frame {current_frame} from {file_path}")
+                frames.append(frame_jpg)
+            current_frame += 1
+    finally:
+        cap.release()
 
     logger.info("Sampled %s frames from video %s", len(frames), file_path)
     return frames
@@ -104,8 +103,8 @@ def load_video(file_path: str, sample_fps: int = 2) -> list[str]:
     Loads a video file as a list of base64 encoded strings.
 
     Args:
-        `file_path` (str): Path to the file (relative or absolute).
-        `sample_fps` (int): The number of frames to sample from the video per second.
+        file_path (str): Path to the file (relative or absolute).
+        sample_fps (int): The number of frames to sample from the video per second.
 
     Returns:
         list[str]: A list of base64 encoded strings sampled from `video_path`.
@@ -128,8 +127,8 @@ def load_video_urls(file_path: str, sample_fps: int = 2) -> list[str]:
     Loads a video file as a list of base64 JPEG data URLs.
 
     Args:
-        `file_path` (str): Path to the file (relative or absolute).
-        `sample_fps` (int): The number of frames to sample from the video per second.
+        file_path (str): Path to the file (relative or absolute).
+        sample_fps (int): The number of frames to sample from the video per second.
 
     Returns:
         list[str]: A list of base64 JPEG data URLs sampled from `file_path`.
@@ -146,7 +145,7 @@ def load_file(file_path: str) -> str:
     Loads a file as a base64 encoded string.
 
     Args:
-        `file_path` (str): Path to the file (relative or absolute).
+        file_path (str): Path to the file (relative or absolute).
 
     Returns:
         str: A base64 encoded string of the image file.
@@ -163,7 +162,7 @@ def load_image(file_path: str) -> str:
     Loads an image file as a base64 encoded string. Currently uses the same logic as `load_file` with a use-case-friendly name.
 
     Args:
-        `file_path` (str): Path to the file (relative or absolute).
+        file_path (str): Path to the file (relative or absolute).
 
     Returns:
         str: A base64 encoded string of the image file.
@@ -179,7 +178,7 @@ def load_audio(file_path: str) -> str:
     Loads an audio file as a base64 encoded string. Currently uses the same logic as `load_file` with a use-case-friendly name.
 
     Args:
-        `file_path` (str): Path to the file (relative or absolute).
+        file_path (str): Path to the file (relative or absolute).
 
     Returns:
         str: A base64 encoded string of the audio file.
@@ -195,7 +194,7 @@ def load_link(url: str) -> str:
     Loads a URL as a base64 encoded string.
 
     Args:
-        `url` (str): URL to load.
+        url (str): URL to load.
 
     Returns:
         str: A base64 encoded string of the response body.
@@ -213,7 +212,7 @@ def load_image_url(file_path: str) -> str:
     Loads an image file as a base64 data URL.
 
     Args:
-        `file_path` (str): Path to the file (relative or absolute).
+        file_path (str): Path to the file (relative or absolute).
 
     Returns:
         str: A base64 data URL of the image file.
@@ -230,7 +229,7 @@ def load_audio_url(file_path: str) -> str:
     Loads an audio file as a base64 data URL.
 
     Args:
-        `file_path` (str): Path to the file (relative or absolute).
+        file_path (str): Path to the file (relative or absolute).
 
     Returns:
         str: A base64 data URL of the audio file.

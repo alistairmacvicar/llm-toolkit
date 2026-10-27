@@ -8,7 +8,7 @@ def get_logger(name: str | None = None):
     Gets a logger in the llm_toolkit namespace.
 
     Args:
-        `name` (str | None): Optional logger name. Defaults to None.
+        name (str | None): Optional logger name. Defaults to None.
 
     Returns:
         logging.Logger: The requested logger.
@@ -26,7 +26,7 @@ def configure_logging(level=logging.INFO):
     Configures basic logging for applications using llm_toolkit.
 
     Args:
-        `level`: Logging level to use. Defaults to logging.INFO.
+        level (int | str): Logging level to use. Defaults to logging.INFO.
     """
 
     logging.basicConfig(level=level)

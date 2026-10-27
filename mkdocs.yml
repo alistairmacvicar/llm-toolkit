@@ -1,0 +1,49 @@
+site_name: llm-toolkit
+site_description: Python tools for multimodal agents, conversations, and realtime media.
+site_url: https://alistairmacvicar.github.io/llm-toolkit/
+repo_url: https://github.com/alistairmacvicar/llm-toolkit
+edit_uri: edit/main/docs/
+strict: true
+theme:
+  name: mkdocs
+  navigation_depth: 3
+extra_css:
+  - stylesheets/api.css
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Usage guide: guide.md
+  - API reference:
+      - Agent: reference/agent.md
+      - Director and characters: reference/director.md
+      - Realtime: reference/realtime.md
+      - Input handling: reference/inputs.md
+      - Media: reference/media.md
+      - Types and logging: reference/types.md
+  - Development and hosting: development.md
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            allow_inspection: false
+            docstring_style: google
+            docstring_options:
+              returns_named_value: false
+            members_order: source
+            show_if_no_docstring: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_signature_annotations: true
+            separate_signature: true
+            show_attribute_values: false
+            show_labels: false
+            merge_init_into_class: true
+            show_source: false
+            filters: ["!^_"]
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true

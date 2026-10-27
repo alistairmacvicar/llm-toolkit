@@ -27,8 +27,8 @@ class InputBuffer:
         Stages an input, replacing an existing input of the same type.
 
         Args:
-            `input_type` (InputType): Type of input being staged.
-            `value` (Any): Captured input value.
+            input_type (InputType): Type of input being staged.
+            value (Any): Captured input value.
 
         Returns:
             list[InputEvent]: The currently staged inputs.
@@ -41,7 +41,7 @@ class InputBuffer:
         Stages multiple inputs as one capture.
 
         Args:
-            `inputs` (Iterable[InputEvent]): Inputs to stage.
+            inputs (Iterable[InputEvent]): Inputs to stage.
 
         Returns:
             list[InputEvent]: The currently staged inputs.
@@ -127,7 +127,7 @@ class InputBuffer:
         Updates whether newly staged inputs are sent immediately.
 
         Args:
-            `auto_send` (bool): Whether to automatically send staged inputs.
+            auto_send (bool): Whether to automatically send staged inputs.
         """
 
         with self._lock:
@@ -142,8 +142,8 @@ class InputBuffer:
         Gets the next queued input event.
 
         Args:
-            `block` (bool): Whether to wait for an event. Defaults to True.
-            `timeout` (float): How long to wait for an event. Defaults to None.
+            block (bool): Whether to wait for an event. Defaults to True.
+            timeout (float): How long to wait for an event. Defaults to None.
 
         Returns:
             ActionEvent: The next queued event.
