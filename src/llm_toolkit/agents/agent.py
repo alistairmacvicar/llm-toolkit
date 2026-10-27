@@ -5,7 +5,6 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, final
-from urllib.request import urlopen
 
 import litellm
 import soundfile as sf
@@ -13,10 +12,13 @@ from litellm import completion, transcription
 
 from llm_toolkit.logging import get_logger
 from llm_toolkit.media.file_source import (
+    DEFAULT_DOWNLOAD_LIMIT,
+    DEFAULT_DOWNLOAD_TIMEOUT,
     load_image_url,
     load_video_urls,
     save_base64_file,
     save_file,
+    save_link,
 )
 from llm_toolkit.types import Content, InputEvent, Message, SessionData, TokenUsage
 
@@ -451,14 +453,7 @@ class Agent:
         if max_frames <= 0:
             raise ValueError("max_frames must be greater than 0")
 
-        frames = load_video_urls(video, sample_fps=sample_fps)
-        if len(frames) > max_frames:
-            if max_frames == 1:
-                frames = frames[:1]
-            else:
-                step = (len(frames) - 1) / (max_frames - 1)
-                frames = [frames[round(index * step)] for index in range(max_frames)]
-            logger.info("Limited video input to %s sampled frames", max_frames)
+        frames = load_video_urls(video, sample_fps=sample_fps, max_frames=max_frames)
 
         prompt = caption or "Describe what happens in this video."
         message = [{"type": "text", "text": prompt}]
@@ -498,7 +493,9 @@ class Agent:
                 case "video":
                     self.send_video(input_event["value"])
 
-    def generate_image(self, prompt: str, model=None, file_path=None, **options):
+    def generate_image(self, prompt: str, model=None, file_path=None, *,
+                       download_max_bytes: int = DEFAULT_DOWNLOAD_LIMIT,
+                       download_timeout: float = DEFAULT_DOWNLOAD_TIMEOUT, **options):
         """
         Generates an image and optionally saves the first result.
 
@@ -506,6 +503,8 @@ class Agent:
             prompt (str): Description of the image to generate.
             model (str): Image model to use. Defaults to the agent model.
             file_path (str): Optional path used to save the first image.
+            download_max_bytes (int): Maximum URL download size; defaults to 64 MiB.
+            download_timeout (float): Timeout for download socket operations in seconds.
             options (Any): Additional options passed to LiteLLM.
 
         Returns:
@@ -520,7 +519,8 @@ class Agent:
         self._track_token_usage(response)
 
         if file_path is not None:
-            self.last_image_path = self._save_generated_image(response, file_path)
+            self.last_image_path = self._save_generated_image(
+                response, file_path, max_bytes=download_max_bytes, timeout=download_timeout)
 
         logger.info("Image generated with model %s", model or self.model)
         return response
@@ -616,7 +616,9 @@ class Agent:
         logger.info("Generated video saved to %s", self.last_video_path)
         return self.last_video_path
 
-    def _save_generated_image(self, response, file_path: str) -> str:
+    def _save_generated_image(self, response, file_path: str, *,
+                              max_bytes=DEFAULT_DOWNLOAD_LIMIT,
+                              timeout=DEFAULT_DOWNLOAD_TIMEOUT) -> str:
         images = self._get_value(response, "data") or []
         if not images:
             raise ValueError("Image generation response did not contain an image")
@@ -628,8 +630,7 @@ class Agent:
 
         image_url = self._get_value(image, "url")
         if image_url:
-            with urlopen(image_url) as image_response:
-                return save_file(image_response.read(), file_path)
+            return save_link(image_url, file_path, max_bytes=max_bytes, timeout=timeout)
 
         raise ValueError("Image generation response did not contain image data")
 
@@ -777,6 +778,17 @@ class Agent:
 
         if context is not None and not isinstance(context, str):
             raise ValueError("Response context must be text")
+        pending = set()
+        for message in self.messages:
+            if message.get("role") == "assistant":
+                pending.update(self._get_value(call, "id")
+                               for call in message.get("tool_calls") or [])
+            elif message.get("role") == "tool":
+                pending.discard(message.get("tool_call_id"))
+        if pending:
+            raise RuntimeError(
+                "Unresolved tool calls: append a tool-role result for every outstanding "
+                "tool_call_id before requesting another completion")
         temporary = {"role": "user", "content": context} if context is not None else None
         if temporary is not None:
             self.messages.append(temporary)

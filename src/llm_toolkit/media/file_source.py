@@ -2,8 +2,9 @@ import base64
 import math
 import mimetypes
 import os.path
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.request import urlopen
 
 import cv2
@@ -11,6 +12,9 @@ import cv2
 from llm_toolkit.logging import get_logger
 
 logger = get_logger(__name__)
+
+DEFAULT_DOWNLOAD_LIMIT = 64 * 1024 * 1024
+DEFAULT_DOWNLOAD_TIMEOUT = 30.0
 
 
 def _get_absolute_path(file_path: str) -> str:
@@ -56,13 +60,14 @@ def _format_data_url(encoded_data: str, mime_type: str) -> str:
     return f"data:{mime_type};base64,{encoded_data}"
 
 
-def _sample_frames(file_path: str, sample_fps: int) -> list[Any]:
+def _sample_frames(file_path: str, sample_fps: int, max_frames: int | None = None) -> list[Any]:
     """
     Samples frames from a video at a specified fps as a list of JPEG images.
 
     Args:
         file_path (str): Path to the file (absolute).
         sample_fps (int): How many frames to sample from the video every second.
+        max_frames (int | None): Maximum retained frames; None keeps every sample.
 
     Returns:
         `list[np.ndarray[int]]`: A list of sampled frames from `video_path` as JPEG images.
@@ -70,6 +75,9 @@ def _sample_frames(file_path: str, sample_fps: int) -> list[Any]:
 
     if not math.isfinite(sample_fps) or sample_fps <= 0:
         raise ValueError("sample_fps must be greater than 0")
+    if max_frames is not None and (isinstance(max_frames, bool) or
+                                  not isinstance(max_frames, int) or max_frames <= 0):
+        raise ValueError("max_frames must be a positive integer or None")
 
     cap = cv2.VideoCapture(file_path)
     frames: list[Any] = []
@@ -80,16 +88,48 @@ def _sample_frames(file_path: str, sample_fps: int) -> list[Any]:
         if not math.isfinite(video_fps) or video_fps <= 0:
             video_fps = sample_fps
         sample_interval = max(1, round(video_fps / sample_fps))
+        selected = None
+        if max_frames is not None and max_frames > 1:
+            # Count without retaining images. Container frame counts and seeks
+            # are unreliable for some codecs, so reopen for an exact second pass.
+            frame_count = 0
+            while cap.grab():
+                frame_count += 1
+            sample_count = (frame_count + sample_interval - 1) // sample_interval
+            count = min(sample_count, max_frames)
+            selected = {
+                round(index * (sample_count - 1) / (count - 1)) * sample_interval
+                for index in range(count)
+            } if count > 1 else ({0} if count else set())
+            cap.release()
+            cap = cv2.VideoCapture(file_path)
+            if not cap.isOpened():
+                raise ValueError(f"Unable to reopen video file: {file_path}")
         current_frame = 0
         while True:
-            success, frame = cap.read()
+            if selected is not None and not selected:
+                break
+            if selected is None:
+                success, frame = cap.read()
+            else:
+                success = cap.grab()
+                frame = None
+                if success and current_frame in selected:
+                    success, frame = cap.retrieve()
+                    if not success:
+                        raise ValueError(f"Unable to retrieve frame {current_frame} from {file_path}")
             if not success:
                 break
-            if current_frame % sample_interval == 0:
+            if (current_frame in selected if selected is not None
+                    else current_frame % sample_interval == 0):
                 success_encode, frame_jpg = cv2.imencode(".jpg", frame)
                 if not success_encode:
                     raise ValueError(f"Unable to encode frame {current_frame} from {file_path}")
                 frames.append(frame_jpg)
+                if selected is not None:
+                    selected.remove(current_frame)
+                if max_frames is not None and len(frames) >= max_frames:
+                    break
             current_frame += 1
     finally:
         cap.release()
@@ -98,20 +138,22 @@ def _sample_frames(file_path: str, sample_fps: int) -> list[Any]:
     return frames
 
 
-def load_video(file_path: str, sample_fps: int = 2) -> list[str]:
+def load_video(file_path: str, sample_fps: int = 2, *, max_frames: int | None = 20) -> list[str]:
     """
     Loads a video file as a list of base64 encoded strings.
 
     Args:
         file_path (str): Path to the file (relative or absolute).
         sample_fps (int): The number of frames to sample from the video per second.
+        max_frames (int | None): Retained frame limit, evenly spaced across the
+            samples including the first and last. None explicitly disables it.
 
     Returns:
         list[str]: A list of base64 encoded strings sampled from `video_path`.
     """
 
     abs_path = _get_absolute_path(file_path)
-    sampled_frames = _sample_frames(file_path=abs_path, sample_fps=sample_fps)
+    sampled_frames = _sample_frames(file_path=abs_path, sample_fps=sample_fps, max_frames=max_frames)
     encoded_frames: list[str] = []
 
     for frame in sampled_frames:
@@ -122,13 +164,14 @@ def load_video(file_path: str, sample_fps: int = 2) -> list[str]:
     return encoded_frames
 
 
-def load_video_urls(file_path: str, sample_fps: int = 2) -> list[str]:
+def load_video_urls(file_path: str, sample_fps: int = 2, *, max_frames: int | None = 20) -> list[str]:
     """
     Loads a video file as a list of base64 JPEG data URLs.
 
     Args:
         file_path (str): Path to the file (relative or absolute).
         sample_fps (int): The number of frames to sample from the video per second.
+        max_frames (int | None): Retained frame limit. None explicitly disables it.
 
     Returns:
         list[str]: A list of base64 JPEG data URLs sampled from `file_path`.
@@ -136,7 +179,7 @@ def load_video_urls(file_path: str, sample_fps: int = 2) -> list[str]:
 
     return [
         _format_data_url(encoded_frame, "image/jpeg")
-        for encoded_frame in load_video(file_path, sample_fps=sample_fps)
+        for encoded_frame in load_video(file_path, sample_fps=sample_fps, max_frames=max_frames)
     ]
 
 
@@ -189,22 +232,69 @@ def load_audio(file_path: str) -> str:
     return encoded_audio
 
 
-def load_link(url: str) -> str:
+def _download_chunks(url: str, max_bytes: int, timeout: float) -> Iterator[bytes]:
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be finite and greater than 0")
+    with urlopen(url, timeout=timeout) as response:
+        total = 0
+        while True:
+            chunk = response.read(min(64 * 1024, max_bytes - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"Download exceeds max_bytes ({max_bytes})")
+            yield chunk
+
+
+def load_link(url: str, *, max_bytes: int = DEFAULT_DOWNLOAD_LIMIT,
+              timeout: float = DEFAULT_DOWNLOAD_TIMEOUT) -> str:
     """
     Loads a URL as a base64 encoded string.
 
     Args:
         url (str): URL to load.
+        max_bytes (int): Maximum response size in bytes; defaults to 64 MiB.
+        timeout (float): Timeout in seconds for blocking socket operations.
 
     Returns:
         str: A base64 encoded string of the response body.
     """
 
-    with urlopen(url) as response:
-        encoded_data = _encode_bytes(response.read())
+    encoded_data = _encode_bytes(b"".join(_download_chunks(url, max_bytes, timeout)))
 
     logger.info("Loaded link %s as base64", url)
     return encoded_data
+
+
+def save_link(url: str, file_path: str, *, max_bytes: int = DEFAULT_DOWNLOAD_LIMIT,
+              timeout: float = DEFAULT_DOWNLOAD_TIMEOUT) -> str:
+    """Stream a URL to disk, replacing the destination only after success.
+
+    Args:
+        url (str): URL to download.
+        file_path (str): Destination path.
+        max_bytes (int): Maximum download size in bytes; defaults to 64 MiB.
+        timeout (float): Timeout in seconds for blocking socket operations.
+
+    Returns:
+        str: Absolute destination path.
+    """
+    output_path = Path(file_path).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=output_path.parent, delete=False) as output:
+            temporary_path = Path(output.name)
+            for chunk in _download_chunks(url, max_bytes, timeout):
+                output.write(chunk)
+        temporary_path.replace(output_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return str(output_path)
 
 
 def load_image_url(file_path: str) -> str:

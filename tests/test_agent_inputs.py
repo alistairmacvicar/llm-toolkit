@@ -130,16 +130,17 @@ class AgentInputTests(unittest.TestCase):
             "data:image/jpeg;base64," + base64.b64encode(b"image data").decode("utf-8"),
         )
 
-    def test_video_frames_are_limited_and_keep_first_and_last_frames(self):
+    def test_video_limit_is_applied_by_loader_before_retaining_frames(self):
         agent = Agent()
-        frames = [f"data:image/jpeg;base64,{index}" for index in range(5)]
+        frames = [f"data:image/jpeg;base64,{index}" for index in (0, 2, 4)]
 
-        with mock.patch.object(agent_module, "load_video_urls", return_value=frames):
+        with mock.patch.object(agent_module, "load_video_urls", return_value=frames) as loader:
             agent.send_video("video.mp4", max_frames=3)
+        loader.assert_called_once_with("video.mp4", sample_fps=2, max_frames=3)
 
         content = agent.messages[0]["content"]
         selected_frames = [item["image_url"]["url"] for item in content[1:]]
-        self.assertEqual(selected_frames, [frames[0], frames[2], frames[4]])
+        self.assertEqual(selected_frames, frames)
 
     def test_confirmed_inputs_can_be_sent_directly_to_agent(self):
         agent = Agent()

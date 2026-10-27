@@ -1,5 +1,6 @@
 import json
 from copy import deepcopy
+from functools import wraps
 from time import perf_counter
 from typing import TYPE_CHECKING, final
 
@@ -15,6 +16,30 @@ if TYPE_CHECKING:
     from llm_toolkit.agents.agent import Agent
 
 logger = get_logger(__name__)
+
+
+def _rollback_on_failure(method):
+    """Restore conversation state, retaining diagnostics and billed token usage."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        agents = {id(agent): agent for agent in
+                  [*self.agents.values(), *self.get_coordinators().values()]
+                  if agent is not None}
+        histories = [(agent, agent.messages, deepcopy(agent.messages))
+                     for agent in agents.values()]
+        state = {name: deepcopy(getattr(self, name)) for name in
+                 ("emotions", "reply_metadata", "public_transcript", "private_transcripts",
+                  "_private_messages")}
+        try:
+            return method(self, *args, **kwargs)
+        except BaseException:
+            for agent, original, messages in histories:
+                original[:] = messages
+                agent.messages = original
+            for name, value in state.items():
+                setattr(self, name, value)
+            raise
+    return wrapped
 
 
 @final
@@ -36,6 +61,7 @@ class Director:
         self.character_sheets: dict[str, CharacterSheet] = {}
         self.public_transcript: list[dict[str, str]] = []
         self.private_transcripts: dict[str, list[dict[str, str]]] = {}
+        self._private_messages: dict[str, list[dict]] = {}
         self.decisions: list[dict] = []
         self.hierarchy: dict[str, list[str]] = {}
         self.coordinators: dict[str, "Agent"] = {}
@@ -153,6 +179,7 @@ class Director:
         del self.agents[name]
         self.character_sheets.pop(name, None)
         self.private_transcripts.pop(name, None)
+        self._private_messages.pop(name, None)
         logger.info("Agent %s removed from director", name)
 
     def public_turn(
@@ -215,13 +242,17 @@ class Director:
         )
         return responses
 
-    def private_turn(self, name: str, message: str) -> str:
+    @_rollback_on_failure
+    def private_turn(self, name: str, message: str, *, isolate: bool = False) -> str:
         """
         Runs a private one-to-one turn between the user and one agent.
 
         Args:
             name (str): Name of the agent receiving the private message.
             message (str): Private user message.
+            isolate (bool): Use a separate private history that is never supplied
+                to public requests. It starts with the character's current history
+                on the first isolated turn and then evolves independently.
 
         Returns:
             str: The agent's private response.
@@ -230,8 +261,18 @@ class Director:
         if name not in self.agents:
             raise ValueError(f"Unknown target: {name}")
 
-        self.whisper("User [private]", name, message)
-        response = self.speak(name, listeners=[])
+        agent = self.agents[name]
+        public_messages = agent.messages
+        if isolate:
+            agent.messages = deepcopy(self._private_messages.get(name, public_messages))
+        try:
+            self.whisper("User [private]", name, message)
+            response = self.speak(name, listeners=[])
+            if isolate:
+                self._private_messages[name] = deepcopy(agent.messages)
+        finally:
+            if isolate:
+                agent.messages = public_messages
         transcript = self.private_transcripts.setdefault(name, [])
         transcript.extend(
             [
@@ -401,6 +442,7 @@ class Director:
         logger.info("Agent %s spoke to %s listeners", name, len(listener_names))
         return response_text
 
+    @_rollback_on_failure
     def converse(
         self,
         speakers: list[str],
@@ -440,6 +482,7 @@ class Director:
         )
         return transcript
 
+    @_rollback_on_failure
     def coordinate(
         self,
         speakers: list[str],

@@ -394,14 +394,7 @@ class RealtimeSession:
         if max_frames <= 0:
             raise ValueError("video_max_frames must be greater than 0")
 
-        frames = load_video_urls(video, sample_fps=sample_fps)
-        if len(frames) <= max_frames:
-            return frames
-        if max_frames == 1:
-            return frames[:1]
-
-        step = (len(frames) - 1) / (max_frames - 1)
-        return [frames[round(index * step)] for index in range(max_frames)]
+        return load_video_urls(video, sample_fps=sample_fps, max_frames=max_frames)
 
     def _prepare_audio(self, audio) -> str:
         if isinstance(audio, str):
