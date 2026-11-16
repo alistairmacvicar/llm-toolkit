@@ -16,8 +16,19 @@ OpenCV may also need `libgl1` and `libglib2.0-0`. Keyboard capture and camera
 previews need a desktop session; OS device permissions are granted separately.
 
 Export the credential for the provider you intend to use, such as
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`. The library does not
-automatically load `.env` files. Keep credentials out of saved sessions and docs.
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`, or create a `.env` file
+in your project directory:
+
+```dotenv
+OPENAI_API_KEY=your-api-key
+```
+
+On the first import of `llm_toolkit` (including its submodules), the library
+searches the current working directory and then its parents for `.env`. It loads
+only the nearest file, preserves existing environment variables, and continues
+normally if no file exists. This happens before provider SDKs are imported, so
+credentials are ready when you create an agent or realtime session. Keep `.env`
+out of version control and credentials out of saved sessions and docs.
 
 ## Send a message
 

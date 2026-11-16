@@ -7,7 +7,9 @@ python -m pip install -e .
 ```
 
 Configure the environment variables required by the LiteLLM provider named in
-`--model`. No example contains an API key. Most commands default to `gpt-5`, but
+`--model`, or put them in `.env`. The library automatically loads the nearest
+`.env` in the working directory or its parents, preserving existing environment
+variables. No example contains an API key. Most commands default to `gpt-5`, but
 any LiteLLM model string can be supplied.
 
 Every program can be launched directly and used interactively. Optional command-line
@@ -95,7 +97,7 @@ python examples/director_conversation.py --turns 4
 Run the complete facilitated conversation with the included cast:
 
 ```bash
-.venv/bin/dotenv run -- .venv/bin/python examples/facilitated_conversation.py \
+python examples/facilitated_conversation.py \
     --model openai/gpt-5 --turns 4
 ```
 
@@ -163,8 +165,7 @@ focused on the conversation.
 Explain that the director handles the flow while each character supplies their
 own dialogue. The model still chooses the wording and optional stopping, so use
 these as conversation starters rather than a fixed transcript. Use `--model` to
-select your configured model. If your credentials are in `.env`, the `dotenv run`
-command above loads them; the library itself does not load that file.
+select your configured model. Credentials in `.env` are loaded automatically.
 
 ## Switching text and voice modes
 
@@ -175,7 +176,7 @@ restores the text model. The conversation continues using transcripts of earlier
 spoken replies.
 
 ```bash
-.venv/bin/dotenv run -- .venv/bin/python examples/modes_and_prompts.py \
+python examples/modes_and_prompts.py \
     --model openai/gpt-5 --voice-model openai/gpt-audio-1.5
 ```
 
@@ -205,7 +206,7 @@ See [audio chat](https://developers.openai.com/api/docs/guides/audio-chat-comple
 keyboard monitoring or macOS Accessibility permission:
 
 ```bash
-.venv/bin/dotenv run -- .venv/bin/python examples/local_capture.py --microphone
+python examples/local_capture.py --microphone
 ```
 
 Type a message and press Enter to stage it, then press Enter again on an empty
@@ -240,7 +241,7 @@ python examples/realtime_chat.py --model azure/YOUR_REALTIME_DEPLOYMENT
 python examples/realtime_chat.py --model xai/grok-voice-latest --output audio
 ```
 
-This example loads the repository's `.env` without overwriting existing environment
+The library loads `.env` automatically without overwriting existing environment
 variables. Set credentials for the selected provider: `OPENAI_API_KEY`,
 `GEMINI_API_KEY`, `XAI_API_KEY`, or Azure's `AZURE_API_KEY` and `AZURE_API_BASE`.
 Vertex AI and Bedrock use their usual cloud credentials and may require additional

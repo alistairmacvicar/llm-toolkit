@@ -9,7 +9,6 @@ import wave
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from dotenv import load_dotenv
 from websockets.exceptions import WebSocketException
 
 from llm_toolkit import AudioOutput, RealtimeSession, configure_logging
@@ -208,7 +207,6 @@ def parse_args(argv=None):
 
 
 if __name__ == "__main__":
-    load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
     arguments = parse_args()
     configure_logging(level="WARNING")
     try:

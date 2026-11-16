@@ -12,7 +12,9 @@ python -m pip install -e .
 ```
 
 Configure the credentials for your provider through environment variables, such as
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`. See the
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`, or put them in a `.env`
+file. On first import, the library loads the nearest `.env` in the current working
+directory or its parents without overriding existing environment variables. See the
 [getting-started guide](https://alistairmacvicar.github.io/llm-toolkit/getting-started/)
 for setup and system dependencies.
 

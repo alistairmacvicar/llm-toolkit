@@ -199,7 +199,8 @@ adapter, model support, credentials, and optional provider dependencies.
 For example, `RealtimeSession(model="azure/my-deployment")` reads Azure's normal
 environment settings. Pass `provider_options={"api_base": "https://..."}` or cloud
 project/region settings when needed. `api_key` is an explicit credential override.
-The library does not load `.env`; the realtime example loads it for convenience.
+On first import, the library loads the nearest `.env` in the current working
+directory or its parents, preserving existing environment variables.
 
 An explicit `url="ws://localhost:4000/v1/realtime"` retains the existing
 OpenAI-compatible WebSocket transport, including proxy model aliases, headers,
