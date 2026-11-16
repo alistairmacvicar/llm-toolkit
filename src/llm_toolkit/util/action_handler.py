@@ -50,6 +50,17 @@ class ActionHandler:
         )
 
         self.action_handler.start()
+        self.action_handler.wait()
+        if not getattr(self.action_handler, "IS_TRUSTED", True):
+            self.running = False
+            self.action_handler.stop()
+            self.action_handler.join()
+            raise PermissionError(
+                "macOS has blocked global keyboard controls. In System Settings > "
+                "Privacy & Security > Accessibility, allow the app running Python "
+                "(such as Terminal or VS Code), then restart that app. Check Input "
+                "Monitoring too if macOS requests it. Alternatively, use terminal controls."
+            )
         logger.info("Action handler started")
 
     def _on_press(self, key):

@@ -37,6 +37,58 @@ audio files must match the session sample rate. Realtime arrays are downmixed to
 mono; integer arrays represent PCM16 sample values and floats use the range
 `[-1, 1]`. `RealtimeEnsemble` requires mono PCM16 at 24 kHz.
 
+## Modes and output capabilities
+
+Change the model and its output settings together when switching to voice:
+
+```python
+chat_model = agent.model
+agent.set_mode(
+    model="openai/gpt-audio-1.5",
+    modalities=["text", "audio"],
+    audio={"voice": "alloy", "format": "wav"},
+)
+# Later, return to text while keeping the conversation:
+agent.set_mode(model=chat_model, modalities=["text"])
+```
+
+`set_mode()` validates the combined configuration before applying it. Unsupported
+audio output raises `ValueError` instead of silently removing audio; a failed
+change preserves the existing configuration and conversation. `set_model()` keeps
+the current output settings, so use `set_mode()` to change both at once.
+
+Outgoing history uses transcripts of previous assistant audio replies when
+available. Original audio remains in the stored session and returned response.
+Raw audio inputs are not discarded or automatically transcribed when changing
+models: if the new model cannot read them, the next request raises a local error.
+Use transcription when initially sending audio if later text-only model switches
+are needed. Audio replies without transcripts also require an audio-input model
+with usable audio references, or a new conversation.
+
+Input and output capabilities do not imply every combination is valid. Known
+OpenAI audio-chat models require audio input or audio output, so a text-only
+request is rejected locally with guidance. Other provider constraints are checked
+by LiteLLM and the provider. See [OpenAI audio chat](https://developers.openai.com/api/docs/guides/audio-chat-completions).
+Applications choose their own model routes; the modes example automatically switches
+between its configured text and voice models and saves/plays voice responses.
+
+## Image generation
+
+Use a dedicated image model when generating images from a chat agent:
+
+```python
+agent.generate_image(
+    "A watercolor robot reading in a library",
+    model="openai/gpt-image-2.5-flare",
+    file_path="recordings/generated-image.png",
+)
+```
+
+`generate_image()` calls LiteLLM's image-generation endpoint. If `model` is
+omitted, it uses `agent.model`; the default chat model `gpt-5` is not valid for
+that endpoint. Pass an image model explicitly, even if the chat model can
+understand image inputs. See OpenAI's [image model documentation](https://developers.openai.com/api/docs/models/gpt-image-2.5-flare).
+
 ## Tools
 
 ```python
@@ -99,6 +151,14 @@ turns. Grounding instructions discourage disclosure; they are not a guarantee
 that a model will never mention something it remembers. Coordinators can form
 a validated hierarchy; see [Director](reference/director.md).
 
+For a casual group conversation, set `director.optional_replies = True` so the
+director may yield before reaching `ai_turns`, and leave `director.avoid_repeat`
+false so a character can answer back within the exchange. The stopping prompt
+allows relevant character-to-character follow-ups in open group chat while still
+respecting a request for one answer or one person's contribution. Give the director
+and characters conversational system prompts; see the director examples. Each
+`public_turn()` is bounded by its reply limit and then returns control to the host.
+
 For text turns, use `isolate=True` consistently when private exchanges must stay
 out of public requests. The separate history starts from the character's current
 history on its first isolated turn and then evolves independently. It remains
@@ -113,15 +173,17 @@ cannot be rolled back; applications must account for them before retrying.
 
 ## Realtime and local capture
 
-Use `RealtimeSession` as an async context manager to close the websocket:
+Select a realtime model with the same `provider/model` convention as `Agent`.
+Use `RealtimeSession` as an async context manager to close the connection:
 
 ```python
 from llm_toolkit import RealtimeSession
 
 async def chat():
-    async with RealtimeSession(
-        "ws://localhost:4000/v1/realtime", model="your-realtime-model"
-    ) as session:
+    async with RealtimeSession(model="openai/gpt-realtime") as session:
+        await session.update_session(
+            instructions="Be conversational and brief.", output_modalities=["text"],
+        )
         await session.send_text("Hello")
         async for event in session.events():
             print(event)
@@ -129,7 +191,37 @@ async def chat():
                 break
 ```
 
+Without a URL, the toolkit runs LiteLLM's realtime provider bridge in process.
+LiteLLM resolves credentials and translates provider events; there is no listening
+port or separate proxy process. Supported conversation routes include OpenAI,
+Azure OpenAI, xAI, Gemini, Vertex AI, and Bedrock, subject to the installed LiteLLM
+adapter, model support, credentials, and optional provider dependencies.
+For example, `RealtimeSession(model="azure/my-deployment")` reads Azure's normal
+environment settings. Pass `provider_options={"api_base": "https://..."}` or cloud
+project/region settings when needed. `api_key` is an explicit credential override.
+The library does not load `.env`; the realtime example loads it for convenience.
+
+An explicit `url="ws://localhost:4000/v1/realtime"` retains the existing
+OpenAI-compatible WebSocket transport, including proxy model aliases, headers,
+and injected `websocket_factory` support. No provider fallback or automatic replay
+occurs on failure. `connect_timeout` bounds startup and cancels partial connections.
+In-process queues are bounded, and closing wakes blocked readers and writers.
+
+Configure the session before sending input. Google Live accepts one initial
+configuration; later changes require a new session. The toolkit defers Google's
+setup so the initial instructions and output settings are preserved, without
+changing LiteLLM's global settings. The current LiteLLM Google adapter does not
+translate image inputs; these raise a local error instead of being silently lost.
+Other modality, voice, tool, and event support is provider/model-specific. Separate
+protocols such as OpenAI Live and transcription-only models are not conversation
+model substitutes. See [LiteLLM realtime support](https://docs.litellm.ai/docs/realtime).
+The bridge uses LiteLLM's internal realtime adapter API; its compatibility is covered
+by provider-routing and event-translation tests, with LiteLLM 1.106.4 as the minimum.
+
 `RealtimeEnsemble` adds cast routing and application callbacks for audio playback.
+Its default peers use the same model-based routing and accept `provider_options`;
+custom `session_factory` remains available. Ensemble models must support its text
+coordinator decisions, tools, audio replies, transcripts, and chosen voice settings.
 Always call `await ensemble.close()` in a `finally` block. Hosts choose recording
 boundaries and must not automatically replay uncertain utterances after failure.
 Concurrent `connect()` calls wait for the same peer initialization. A failed
@@ -139,7 +231,12 @@ peers. Audio already played or events already delivered cannot be undone.
 call `connect()` explicitly to establish a new connection without replaying data.
 
 `InputBuffer` stages inputs without hardware. `ActionHandler` starts a global
-keyboard listener; create it only in a desktop application. Call `quit()` on
+keyboard listener; create it only in a desktop application. It raises
+`PermissionError` if the listener reports that macOS has not granted access.
+For terminal applications, drive `InputBuffer` directly with ordinary `input()`
+commands, as the local capture example does by default. That path does not require
+global keyboard monitoring; `--global-hotkeys` enables the optional listener.
+Call `quit()` on
 capture sources and action handlers to release their resources. `AudioOutput`
 opens the selected output device only during playback.
 PCM playback accepts samples split across chunks and writes at most 4,096 samples

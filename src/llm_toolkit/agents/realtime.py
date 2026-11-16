@@ -1,6 +1,8 @@
 import asyncio
 import base64
+import copy
 import json
+import math
 import os
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -83,22 +85,48 @@ class RealtimeSession:
 
     def __init__(
         self,
-        url: str,
-        model: str,
+        url: str = None,
+        model: str = "openai/gpt-realtime",
         api_key: str = None,
         headers: dict[str, str] = None,
         websocket_factory: Callable = None,
         sample_rate: int = 24000,
+        *,
+        provider_options: dict[str, Any] = None,
+        connect_timeout: float = 30,
     ):
-        self.url = self._get_url(url, model)
+        """Connect by model through LiteLLM, or supply an explicit proxy URL.
+
+        With no URL, LiteLLM resolves provider credentials from the environment
+        and translates realtime events in process. `provider_options` accepts
+        provider settings such as `api_base`, `api_version`, or `vertex_project`.
+        An explicit URL retains the OpenAI-compatible WebSocket transport.
+        """
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("A realtime model is required")
+        if not math.isfinite(connect_timeout) or connect_timeout <= 0:
+            raise ValueError("connect_timeout must be finite and positive")
+        if provider_options is not None and not isinstance(provider_options, dict):
+            raise ValueError("provider_options must be an object")
+        if url is not None and provider_options:
+            raise ValueError("Use provider_options with a model-only connection; use headers/api_key with a proxy URL")
+        if url is None and websocket_factory is not None:
+            raise ValueError("websocket_factory requires an explicit URL")
+        reserved = {"model", "websocket", "api_key", "headers", "timeout"}
+        if reserved.intersection(provider_options or {}):
+            raise ValueError("provider_options cannot override model, websocket, api_key, headers, or timeout")
+        self.url = self._get_url(url, model) if url is not None else None
         self.model = model
         self.headers = dict(headers or {})
+        self._api_key = api_key
+        self.provider_options = copy.deepcopy(provider_options or {})
+        self.connect_timeout = connect_timeout
         self.sample_rate = sample_rate
         self._websocket_factory = websocket_factory
         self._websocket = None
         self._connection_lock = asyncio.Lock()
 
-        if api_key is not None:
+        if api_key is not None and self.url is not None:
             self.headers.setdefault("Authorization", f"Bearer {api_key}")
 
     @property
@@ -120,23 +148,30 @@ class RealtimeSession:
             RealtimeSession: The connected realtime session.
         """
 
-        websocket_factory = self._websocket_factory
-        if websocket_factory is None:
-            from websockets.asyncio.client import connect
-
-            websocket_factory = connect
-
         async with self._connection_lock:
             if self.connected:
                 return self
             websocket, self._websocket = self._websocket, None
             if websocket is not None:
                 await websocket.close()
-            self._websocket = await websocket_factory(
-                self.url,
-                additional_headers=self.headers,
-            )
-        logger.info("Realtime session connected to %s", self.url)
+            if self.url is None:
+                from llm_toolkit.agents.realtime_transport import ProviderConnection
+
+                self._websocket = await ProviderConnection.connect(
+                    model=self.model, api_key=self._api_key, headers=self.headers,
+                    timeout=self.connect_timeout, options=copy.deepcopy(self.provider_options),
+                )
+            else:
+                websocket_factory = self._websocket_factory
+                if websocket_factory is None:
+                    from websockets.asyncio.client import connect
+
+                    websocket_factory = connect
+                self._websocket = await asyncio.wait_for(websocket_factory(
+                    self.url,
+                    additional_headers=self.headers,
+                ), timeout=self.connect_timeout)
+        logger.info("Realtime session connected with model %s", self.model)
         return self
 
     async def close(self):

@@ -3,7 +3,6 @@
 import asyncio
 import base64
 import json
-import os
 from copy import deepcopy
 from time import perf_counter
 from typing import final
@@ -27,7 +26,8 @@ class RealtimeEnsemble:
     """
 
     def __init__(self, director, *, model, voices=None, emit=None, wait_playback=None,
-                 session_factory=None, api_key=None, timeout=90, speaker_delay=0.3):
+                 session_factory=None, api_key=None, timeout=90, speaker_delay=0.3,
+                 provider_options=None):
         self.director = director
         self.model = model
         self.voices = dict(voices or {})
@@ -35,6 +35,7 @@ class RealtimeEnsemble:
         self.wait_playback = wait_playback or self._ignore
         self.session_factory = session_factory
         self.api_key = api_key
+        self.provider_options = deepcopy(provider_options or {})
         self.timeout = timeout
         self.speaker_delay = speaker_delay
         self.sessions = {}
@@ -76,10 +77,8 @@ class RealtimeEnsemble:
         if self.session_factory:
             session = self.session_factory(name)
         else:
-            key = self.api_key or os.getenv("OPENAI_API_KEY")
-            if not key:
-                raise ValueError("Set OPENAI_API_KEY to use realtime voice")
-            session = RealtimeSession("wss://api.openai.com/v1/realtime", self.model, api_key=key)
+            session = RealtimeSession(model=self.model, api_key=self.api_key,
+                                      provider_options=self.provider_options)
         self.sessions[name] = session
         await session.connect()
         is_character = name in self.director.agents

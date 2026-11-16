@@ -44,10 +44,88 @@ class AgentInputTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def test_input_and_output_modalities_are_tracked_separately(self):
-        agent = Agent(modalities=["text", "audio"])
+        agent = Agent(modalities=["text"])
 
         self.assertEqual(agent.input_modalities, ["text", "audio", "image"])
         self.assertEqual(agent.modalities, ["text"])
+
+    def test_unsupported_audio_output_is_rejected_without_partial_mode_changes(self):
+        with self.assertRaisesRegex(ValueError, "does not support audio output"):
+            Agent(modalities=["text", "audio"])
+        agent = Agent(system_prompt="Original prompt")
+        agent.send_text("Keep this conversation")
+        before = agent.get_session()
+        with self.assertRaisesRegex(ValueError, "does not support audio output"):
+            agent.set_mode(model="another/text-model", system_prompt="Voice prompt",
+                           modalities=["text", "audio"], transcription_enabled=True)
+        self.assertEqual(agent.get_session(), before)
+        with self.assertRaises(ValueError):
+            agent.set_output_modalities(["text", "audio"])
+        self.assertEqual(agent.get_session(), before)
+
+    def test_model_and_output_can_switch_together_in_both_directions(self):
+        agent_module.litellm.supports_audio_output.side_effect = lambda model: model == "test/voice"
+        agent = Agent(model="test/text")
+        agent.set_mode(model="test/voice", modalities=["text", "audio"])
+        with self.assertRaises(ValueError):
+            agent.set_model("test/text")
+        self.assertEqual(agent.model, "test/voice")
+        self.assertEqual(agent.modalities, ["text", "audio"])
+        agent.set_mode(model="test/text", modalities=["text"])
+        self.assertEqual(agent.model, "test/text")
+        self.assertEqual(agent.modalities, ["text"])
+
+    def test_invalid_output_modalities_do_not_replace_existing_settings(self):
+        agent = Agent()
+        for modalities in ([], ["image"], ["video"]):
+            with self.subTest(modalities=modalities), self.assertRaises(ValueError):
+                agent.set_output_modalities(modalities)
+            self.assertEqual(agent.modalities, ["text"])
+
+    def test_audio_chat_text_only_request_fails_before_calling_provider(self):
+        agent = Agent(model="openai/gpt-audio-1.5")
+        agent.send_text("How are you?")
+        with self.assertRaisesRegex(ValueError, "needs audio input or audio output"):
+            agent.get_response()
+        agent_module.completion.assert_not_called()
+
+    def test_audio_chat_can_return_text_when_audio_input_is_present(self):
+        agent = Agent(model="openai/gpt-audio-1.5")
+        agent.send_audio(b"wav data")
+        response = self._response({"role": "assistant", "content": "Hello"})
+        with mock.patch.object(agent_module, "completion", return_value=response) as request:
+            self.assertIs(agent.get_response(), response)
+        self.assertEqual(request.call_count, 1)
+
+    def test_spoken_reply_transcript_survives_switch_to_text_model(self):
+        agent_module.litellm.supports_audio_output.return_value = True
+        agent = Agent(model="test/voice", modalities=["text", "audio"])
+        audio = {"id": "voice-id", "data": "encoded-audio", "transcript": "You prefer tea."}
+        voice_response = self._response({"role": "assistant", "content": None, "audio": audio})
+        with mock.patch.object(agent_module, "completion", return_value=voice_response):
+            agent.send_text("I prefer tea.")
+            agent.get_response()
+        agent_module.litellm.supports_audio_input.return_value = False
+        agent_module.litellm.supports_audio_output.return_value = False
+        agent.set_mode(model="test/text", modalities=["text"])
+        text_response = self._response({"role": "assistant", "content": "Still tea."})
+        with mock.patch.object(agent_module, "completion", return_value=text_response) as request:
+            agent.send_text("What do I prefer?")
+            agent.get_response()
+        outgoing_reply = request.call_args.kwargs["messages"][2]
+        self.assertEqual(outgoing_reply, {"role": "assistant", "content": "You prefer tea."})
+        self.assertEqual(agent.messages[1]["audio"], audio)
+        self.assertIsNone(agent.messages[1]["content"])
+        self.assertNotIn("modalities", request.call_args.kwargs)
+
+    def test_raw_audio_history_is_not_silently_discarded_on_text_model_switch(self):
+        agent = Agent(model="test/voice")
+        agent.send_audio(b"recorded words")
+        agent_module.litellm.supports_audio_input.return_value = False
+        agent.set_model("test/text")
+        with self.assertRaisesRegex(ValueError, "history contains audio input"):
+            agent.get_response()
+        agent_module.completion.assert_not_called()
 
     def test_model_can_be_changed_and_capabilities_are_refreshed(self):
         agent = Agent(model="first/model")

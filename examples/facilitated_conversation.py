@@ -4,12 +4,7 @@ from pathlib import Path
 
 from llm_toolkit import Agent, CharacterSheet, Director, configure_logging
 
-
-DIRECTOR_PROMPT = """You facilitate a public conversation between a user and a cast
-of characters. Choose the speaker who can move the conversation forward. Consider the
-character sheets, who the user addressed, what has already been said, and the remaining
-AI turn budget. Characters may respond to the user or converse with one another. Keep
-private direction brief and do not invent dialogue for the selected speaker."""
+from _common import DIRECTOR_PROMPT
 
 
 def load_cast(file_path: str) -> list[CharacterSheet]:
@@ -48,6 +43,8 @@ def create_conversation(arguments) -> Director:
         director_agent=director_agent,
         ai_turns=arguments.turns,
     )
+    director.optional_replies = True
+    director.avoid_repeat = False  # Let a character answer back after someone else speaks.
 
     for character in load_cast(arguments.cast):
         director.add_character(character, model=arguments.model)
@@ -108,7 +105,7 @@ def show_help():
     print("Public message                 Everyone hears it")
     print("@NAME: message                Publicly address one character")
     print("/whisper NAME: message        Private one-to-one turn")
-    print("/turns NUMBER                 Set AI turns per public user turn")
+    print("/turns NUMBER                 Set the maximum replies per message")
     print("/history                      Show public transcript")
     print("/private NAME                 Show one private transcript")
     print("/cast                         Show character names")
@@ -141,7 +138,7 @@ def handle_command(director: Director, command: str) -> bool:
         print_private_history(director, name)
     elif command.startswith("/turns "):
         director.set_ai_turns(int(command.removeprefix("/turns ").strip()))
-        print(f"AI turns per public user turn: {director.ai_turns}")
+        print(f"Up to {director.ai_turns} replies per message; the conversation may pause sooner.")
     elif command.startswith("/whisper "):
         target, message = parse_directed_message(command.removeprefix("/whisper "))
         response = director.private_turn(target, message)
@@ -158,6 +155,8 @@ def handle_command(director: Director, command: str) -> bool:
 def main(arguments):
     director = create_conversation(arguments)
     print_cast(director)
+    print("Everyone hears public messages and can talk to you or each other.")
+    print(f"Up to {director.ai_turns} replies before your next turn; the group may pause sooner.")
     show_help()
 
     while True:
@@ -171,15 +170,18 @@ def main(arguments):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run a facilitated public and private multi-agent conversation."
+        description="Have a relaxed group chat with public messages and private asides."
     )
-    parser.add_argument("--model", default="openai/gpt-4.1-nano")
+    parser.add_argument("--model", default="openai/gpt-5")
     parser.add_argument("--director-model")
-    parser.add_argument("--turns", type=int, default=2)
+    parser.add_argument(
+        "--turns", type=int, default=4,
+        help="Maximum character replies per message; the director may stop earlier.",
+    )
     parser.add_argument(
         "--cast",
         default=str(Path(__file__).with_name("ensemble_cast.json")),
     )
     arguments = parser.parse_args()
-    configure_logging()
+    configure_logging(level="WARNING")
     main(arguments)

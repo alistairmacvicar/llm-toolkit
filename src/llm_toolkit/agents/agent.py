@@ -50,7 +50,7 @@ class Agent:
         completion_options=None,
     ):
         self.model = model
-        self.modalities = list(dict.fromkeys(modalities or ["text"]))
+        self.modalities = list(dict.fromkeys(["text"] if modalities is None else modalities))
         self.audio = copy.deepcopy(audio or {"voice": "alloy", "format": "wav"})
         self.messages = copy.deepcopy(list(messages or []))
         self.transcription_model = transcription_model
@@ -239,10 +239,7 @@ class Agent:
             model (str): The new LiteLLM model name.
         """
 
-        self.model = model
-        self._model_support = {}
-        self.input_modalities = ["text"]
-        self._update_model_support()
+        self.set_mode(model=model)
         logger.info("Agent model changed to %s", self.model)
 
     def set_output_modalities(self, modalities: list[str], audio=None):
@@ -254,15 +251,7 @@ class Agent:
             audio (dict): Optional audio output configuration.
         """
 
-        self.modalities = list(dict.fromkeys(modalities))
-        if audio is not None:
-            self.audio = dict(audio)
-
-        if "audio" in self.modalities and not self._supports_audio_output():
-            self.modalities.remove("audio")
-            logger.warning("Model %s does not support audio output", self.model)
-
-        logger.info("Agent output modalities changed to %s", self.modalities)
+        self.set_mode(modalities=modalities, audio=audio)
 
     def set_mode(
         self,
@@ -273,7 +262,11 @@ class Agent:
         transcription_enabled: bool = None,
     ):
         """
-        Updates related model, prompt, and output settings together.
+        Updates related model, prompt, and output settings atomically.
+
+        Unsupported output modalities raise ValueError without changing the
+        existing settings. Supply model explicitly when a mode needs a different
+        model; the library does not select a provider or model on your behalf.
 
         Args:
             model (str): Optional LiteLLM model name.
@@ -283,14 +276,18 @@ class Agent:
             transcription_enabled (bool): Optional transcription setting.
         """
 
-        if model is not None:
-            self.set_model(model)
-        if system_prompt is not None:
-            self.set_system_prompt(system_prompt)
-        if modalities is not None or audio is not None:
-            self.set_output_modalities(modalities or self.modalities, audio=audio)
-        if transcription_enabled is not None:
-            self.set_transcription(transcription_enabled)
+        candidate = copy.copy(self)
+        candidate.model = self.model if model is None else model
+        candidate.system_prompt = self.system_prompt if system_prompt is None else system_prompt
+        candidate.modalities = list(dict.fromkeys(self.modalities if modalities is None else modalities))
+        candidate.audio = copy.deepcopy(self.audio if audio is None else audio)
+        candidate.transcription_enabled = (
+            self.transcription_enabled if transcription_enabled is None else transcription_enabled
+        )
+        candidate._model_support = dict(self._model_support) if candidate.model == self.model else {}
+        candidate.input_modalities = ["text"]
+        candidate._update_model_support()
+        self.__dict__.update(candidate.__dict__)
 
         logger.info("Agent mode updated")
 
@@ -508,7 +505,9 @@ class Agent:
 
         Args:
             prompt (str): Description of the image to generate.
-            model (str): Image model to use. Defaults to the agent model.
+            model (str): Image-generation model to use. Defaults to the agent model,
+                which must support image generation. For a chat agent, pass a
+                dedicated image model explicitly.
             file_path (str): Optional path used to save the first image.
             download_max_bytes (int): Maximum URL download size; defaults to 64 MiB.
             download_timeout (float): Timeout for download socket operations in seconds.
@@ -645,9 +644,14 @@ class Agent:
         self._sync_input_modality("audio", self._supports_audio_input())
         self._sync_input_modality("image", self._supports_image_input())
 
+        if not self.modalities or any(mode not in {"text", "audio"} for mode in self.modalities):
+            raise ValueError("Chat output modalities must contain text and/or audio")
         if "audio" in self.modalities and not self._supports_audio_output():
-            self.modalities.remove("audio")
-            logger.warning("Model %s does not support audio output", self.model)
+            raise ValueError(
+                f"Model {self.model} does not support audio output. "
+                "Use set_mode(model=..., modalities=['text', 'audio']) with an "
+                "audio-capable chat model, or request text output."
+            )
 
     def _sync_input_modality(self, modality: str, is_supported: bool):
         if is_supported and modality not in self.input_modalities:
@@ -896,8 +900,57 @@ class Agent:
         self.validate_completion_options(options)
         self.completion_options = copy.deepcopy(options)
 
+    def _completion_messages(self):
+        """Use portable transcripts for previous spoken replies, retaining source audio."""
+        messages = [{"role": "system", "content": self.system_prompt}]
+        for original in self.messages:
+            message = dict(original)
+            audio = message.get("audio") if message.get("role") == "assistant" else None
+            if audio:
+                transcript = self._get_value(audio, "transcript")
+                if transcript or message.get("content"):
+                    if not message.get("content"):
+                        message["content"] = transcript
+                    message.pop("audio", None)
+                elif self._supports_audio_input() and self._get_value(audio, "id"):
+                    message["audio"] = {"id": self._get_value(audio, "id")}
+                else:
+                    raise ValueError(
+                        "A previous audio reply has no transcript for this model. "
+                        "Use an audio-input model or start a new conversation."
+                    )
+            messages.append(message)
+        return messages
+
+    def _validate_completion_modalities(self, messages):
+        # Audio-chat families accept text, but their Chat Completions requests
+        # must include audio on at least one side. Capability booleans alone do
+        # not describe this combination constraint.
+        has_audio_input = any(
+            message.get("audio") or (
+                isinstance(message.get("content"), list)
+                and any(part.get("type") == "input_audio" for part in message["content"])
+            )
+            for message in messages
+        )
+        audio_chat = self.model.split("/")[-1].startswith(
+            ("gpt-audio", "gpt-4o-audio-preview", "gpt-4o-mini-audio-preview")
+        )
+        if audio_chat and "audio" not in self.modalities and not has_audio_input:
+            raise ValueError(
+                f"Model {self.model} needs audio input or audio output. "
+                "Enable voice output with modalities=['text', 'audio'], send audio, "
+                "or switch to a text-chat model."
+            )
+        if has_audio_input and not self._supports_audio_input():
+            raise ValueError(
+                f"Conversation history contains audio input that {self.model} cannot read. "
+                "Use an audio-input model, or start a new conversation with transcription enabled."
+            )
+
     def _request_completion(self, *, response_format=None):
-        messages = [{"role": "system", "content": self.system_prompt}, *self.messages]
+        messages = self._completion_messages()
+        self._validate_completion_modalities(messages)
         completion_args = {
             **copy.deepcopy(self.completion_options),
             "model": self.model,

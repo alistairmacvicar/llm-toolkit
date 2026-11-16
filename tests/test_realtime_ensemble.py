@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import unittest
+from unittest import mock
 
 from llm_toolkit.agents.director import Director
 from llm_toolkit.agents.realtime_ensemble import RealtimeEnsemble
@@ -95,6 +96,18 @@ class RealtimeEnsembleTests(unittest.IsolatedAsyncioTestCase):
         self.ensemble = RealtimeEnsemble(self.director, model="test", session_factory=factory,
                                          emit=emit, wait_playback=played, speaker_delay=0, timeout=1)
         self.addAsyncCleanup(self.ensemble.close)
+
+    async def test_default_peer_uses_selected_provider_without_an_openai_key_requirement(self):
+        self.ensemble.session_factory = None
+        self.ensemble.model = "azure/my-voice-deployment"
+        self.ensemble.provider_options = {"api_base": "https://example.openai.azure.com"}
+        with mock.patch("llm_toolkit.agents.realtime_ensemble.RealtimeSession", side_effect=lambda **kwargs: Peer("provider")) as factory:
+            await self.ensemble.connect()
+        self.assertEqual(factory.call_count, 3)
+        for call in factory.call_args_list:
+            self.assertEqual(call.kwargs["model"], "azure/my-voice-deployment")
+            self.assertEqual(call.kwargs["provider_options"], self.ensemble.provider_options)
+            self.assertNotIn("url", call.kwargs)
 
     async def test_public_turn_enforces_target_and_commits_ordered_replies(self):
         await self.ensemble.begin(target="Lin")

@@ -2,6 +2,8 @@ import argparse
 
 from llm_toolkit import Agent, Director, configure_logging
 
+from _common import CHAT_STYLE
+
 
 def run_round(director: Director, topic: str):
     """
@@ -15,30 +17,34 @@ def run_round(director: Director, topic: str):
     director.broadcast(topic)
     director.whisper(
         "director",
-        "analyst",
-        "Begin with the strongest available evidence.",
+        "Iris",
+        "React naturally to what the user just said. Keep it brief.",
     )
-    analyst_reply = director.speak("analyst")
-    print(f"Analyst: {analyst_reply}")
+    iris_reply = director.speak("Iris")
+    print(f"Iris: {iris_reply}")
 
-    director.whisper("director", "skeptic", "Focus on one testable risk.")
-    skeptic_reply = director.speak("skeptic")
-    print(f"Skeptic: {skeptic_reply}")
+    director.whisper("director", "Rowan", "Pick up on something Iris said in your own way.")
+    rowan_reply = director.speak("Rowan")
+    print(f"Rowan: {rowan_reply}")
 
 
 def main(model: str, topic: str = None):
-    analyst = Agent(
+    iris = Agent(
         model=model,
-        system_prompt="You are an analyst. State one evidence-based observation.",
+        system_prompt="You are Iris, warm and curious, chatting over coffee. " + CHAT_STYLE,
     )
-    skeptic = Agent(
+    rowan = Agent(
         model=model,
-        system_prompt="You are a skeptic. Test claims constructively.",
+        system_prompt="You are Rowan, laid-back and dryly funny, chatting over coffee. " + CHAT_STYLE,
     )
-    director = Director({"analyst": analyst, "skeptic": skeptic})
+    director = Director({"Iris": iris, "Rowan": rowan})
 
-    print("Enter a discussion topic.")
-    print("Commands: /overhear MESSAGE, /converse MESSAGE, /quit")
+    print("Manual routing demo: Python chooses when Iris and Rowan speak.")
+    print("Plain message       Both hear you; Iris replies, then Rowan reacts to Iris")
+    print("/converse MESSAGE   Iris and Rowan talk to each other; you watch")
+    print("/overhear MESSAGE   Both hear the message without replying")
+    print("/quit               Stop")
+    print("For an AI-facilitated group chat with you, use facilitated_conversation.py.")
 
     while True:
         current_topic = topic or input("Topic: ").strip()
@@ -51,8 +57,9 @@ def main(model: str, topic: str = None):
             continue
         if current_topic.startswith("/converse "):
             message = current_topic.removeprefix("/converse ").strip()
+            print("Iris and Rowan are talking to each other:")
             transcript = director.converse(
-                ["analyst", "skeptic"],
+                ["Iris", "Rowan"],
                 opening_message=message,
                 rounds=1,
             )
@@ -75,5 +82,5 @@ if __name__ == "__main__":
         help="Run one discussion instead of opening the interactive prompt.",
     )
     arguments = parser.parse_args()
-    configure_logging()
+    configure_logging(level="WARNING")
     main(arguments.model, arguments.topic)

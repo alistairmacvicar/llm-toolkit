@@ -26,10 +26,16 @@ def turn_instructions(max_turns, completed, *, optional_replies):
         return policy + "An initial reply is required. Select an eligible speaker."
     return (policy + "Decide whether to STOP before selecting another speaker. If the participant "
             "asked for one answer or one person's contribution and that answer has been given, "
-            "STOP. If the request is otherwise satisfied, STOP. A character being available or "
-            "able to comment is not a reason to continue. Continue only to supply a still-missing "
-            "requested answer or a distinct perspective the participant invited. "
-            'To STOP, return {"speaker":null,"instruction":"","reason":"The request is satisfied.",'
+            "STOP. For a focused task, stop once the request is satisfied. In an open-ended "
+            "group conversation, a relevant character-to-character follow-up can continue the "
+            "exchange even after the initial user remark has been answered: a response to "
+            "another character's question, a specific reaction, or a natural disagreement. "
+            "Such follow-ups do not need a separate invitation from the user. Respect the "
+            "requested scope; do not invent a debate or require everyone to speak. Stop at a "
+            "natural pause, when the group needs the user's answer, or when another reply "
+            "would repeat what was said. A character merely being available is not a reason "
+            "to continue. "
+            'To STOP, return {"speaker":null,"instruction":"","reason":"A natural pause.",'
             '"emotion":"neutral"}; adapt the reason to the actual conversation. '
             "Use JSON null, not the string \"null\". Otherwise select an eligible speaker.")
 

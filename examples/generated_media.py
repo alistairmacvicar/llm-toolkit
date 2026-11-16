@@ -4,6 +4,8 @@ from pathlib import Path
 
 from llm_toolkit import Agent, configure_logging
 
+DEFAULT_IMAGE_MODEL = "openai/gpt-image-2.5-flare"
+
 
 def generate(agent: Agent, kind: str, media_model: str, prompt: str, output: str):
     """
@@ -50,19 +52,23 @@ def generate(agent: Agent, kind: str, media_model: str, prompt: str, output: str
 
 def main(arguments):
     agent = Agent(model=arguments.model)
+    media_model = arguments.media_model
+    if not media_model and arguments.kind == "image":
+        media_model = DEFAULT_IMAGE_MODEL
 
-    if arguments.kind and arguments.media_model and arguments.prompt:
+    if arguments.kind and media_model and arguments.prompt:
         output = arguments.output or get_default_output(arguments.kind)
         generate(
             agent,
             arguments.kind,
-            arguments.media_model,
+            media_model,
             arguments.prompt,
             output,
         )
         return
 
     print("Choose image, speech, or video. Enter /quit to stop.")
+    print("Use a model for the selected media type.")
 
     while True:
         kind = input("Media type: ").strip().lower()
@@ -72,7 +78,13 @@ def main(arguments):
             print("Media type must be image, speech, or video.")
             continue
 
-        media_model = input("LiteLLM media model: ").strip()
+        default_model = arguments.media_model or (
+            DEFAULT_IMAGE_MODEL if kind == "image" else ""
+        )
+        model_label = f"LiteLLM {kind} model"
+        if default_model:
+            model_label += f" [{default_model}]"
+        media_model = input(f"{model_label}: ").strip() or default_model
         prompt_label = "Text" if kind == "speech" else "Prompt"
         prompt = input(f"{prompt_label}: ").strip()
         default_output = get_default_output(kind)
@@ -88,10 +100,19 @@ def get_default_output(kind: str) -> str:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate image, speech, or video media.")
+    parser = argparse.ArgumentParser(
+        description="Generate image, speech, or video media."
+    )
     parser.add_argument("kind", nargs="?", choices=["image", "speech", "video"])
-    parser.add_argument("--model", default="gpt-5")
-    parser.add_argument("--media-model")
+    parser.add_argument(
+        "--model",
+        default="gpt-5",
+        help="Agent chat model; media generation uses --media-model instead.",
+    )
+    parser.add_argument(
+        "--media-model",
+        help=f"Model for the selected media type (images default to {DEFAULT_IMAGE_MODEL}).",
+    )
     parser.add_argument("--prompt")
     parser.add_argument("--output")
     arguments = parser.parse_args()
