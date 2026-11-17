@@ -94,6 +94,7 @@ class RealtimeSession:
         *,
         provider_options: dict[str, Any] = None,
         connect_timeout: float = 30,
+        recording_dir=None,
     ):
         """Connect by model through LiteLLM, or supply an explicit proxy URL.
 
@@ -125,6 +126,9 @@ class RealtimeSession:
         self._websocket_factory = websocket_factory
         self._websocket = None
         self._connection_lock = asyncio.Lock()
+        self.recording_dir = recording_dir
+        self.last_input_audio_path = None
+        self._audio_archive = None
 
         if api_key is not None and self.url is not None:
             self.headers.setdefault("Authorization", f"Bearer {api_key}")
@@ -152,8 +156,11 @@ class RealtimeSession:
             if self.connected:
                 return self
             websocket, self._websocket = self._websocket, None
-            if websocket is not None:
-                await websocket.close()
+            try:
+                if websocket is not None:
+                    await websocket.close()
+            finally:
+                self._close_audio_archive()
             if self.url is None:
                 from llm_toolkit.agents.realtime_transport import ProviderConnection
 
@@ -181,9 +188,11 @@ class RealtimeSession:
 
         async with self._connection_lock:
             websocket, self._websocket = self._websocket, None
-            if websocket is None:
-                return
-            await websocket.close()
+            try:
+                if websocket is not None:
+                    await websocket.close()
+            finally:
+                self._close_audio_archive()
         logger.info("Realtime session closed")
 
     async def __aenter__(self):
@@ -203,6 +212,12 @@ class RealtimeSession:
         if self._websocket is None:
             raise RuntimeError("Realtime session is not connected")
 
+        if event.get("type") == "input_audio_buffer.append":
+            self._archive_audio(event["audio"])
+        elif event.get("type") == "conversation.item.create":
+            for part in event.get("item", {}).get("content", []):
+                if part.get("type") == "input_audio" and part.get("audio"):
+                    self._archive_audio(part["audio"])
         await self._websocket.send(json.dumps(event))
         logger.debug("Realtime event sent: %s", event.get("type"))
 
@@ -219,6 +234,7 @@ class RealtimeSession:
 
         event = json.loads(await self._websocket.recv())
         logger.debug("Realtime event received: %s", event.get("type"))
+        self._log_transcript(event)
         return event
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
@@ -235,7 +251,32 @@ class RealtimeSession:
         async for message in self._websocket:
             event = json.loads(message)
             logger.debug("Realtime event received: %s", event.get("type"))
+            self._log_transcript(event)
             yield event
+
+    def _archive_audio(self, encoded):
+        from llm_toolkit.media.recording import PCMArchive
+
+        data = base64.b64decode(encoded, validate=True)
+        if not data:
+            return
+        if self._audio_archive is None:
+            self._audio_archive = PCMArchive(self.recording_dir, self.sample_rate)
+            self.last_input_audio_path = str(self._audio_archive.path.resolve())
+        self._audio_archive.write(data)
+
+    def _close_audio_archive(self):
+        archive, self._audio_archive = self._audio_archive, None
+        if archive is not None:
+            archive.close()
+
+    @staticmethod
+    def _log_transcript(event):
+        kind = event.get("type")
+        if kind == "conversation.item.input_audio_transcription.completed":
+            logger.info("User audio transcript: %s", event.get("transcript", ""))
+        elif kind in {"response.output_audio_transcript.done", "response.audio_transcript.done"}:
+            logger.info("Assistant audio transcript: %s", event.get("transcript", ""))
 
     async def update_session(
         self,

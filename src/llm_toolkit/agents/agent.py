@@ -1,5 +1,6 @@
 import base64
 import copy
+import hashlib
 import io
 import json
 from collections.abc import Callable
@@ -48,6 +49,7 @@ class Agent:
         tool_choice=None,
         system_prompt="You are a friendly assistant.",
         completion_options=None,
+        recording_dir=None,
     ):
         self.model = model
         self.modalities = list(dict.fromkeys(["text"] if modalities is None else modalities))
@@ -71,6 +73,9 @@ class Agent:
         self.last_image_path = None
         self.last_speech_path = None
         self.last_video_path = None
+        self.recording_dir = recording_dir
+        self.last_input_audio_path = None
+        self._input_audio_archives = {}
 
         self._update_model_support()
         logger.info(
@@ -81,6 +86,7 @@ class Agent:
         )
 
     def _send_message(self, content: str | list[Content], role="user"):
+        self._archive_message_audio(content)
         self.messages.append({"role": role, "content": content})
         logger.debug("Added %s message; history length is now %s", role, len(self.messages))
 
@@ -449,7 +455,8 @@ class Agent:
 
         Args:
             video (str): Path to the video file.
-            caption (str): Optional text to send with the video.
+            caption (str): Optional text to send with the video. An empty string
+                omits the default description request.
             sample_fps (int): The number of frames to sample per second.
             max_frames (int): Maximum number of frames to send.
         """
@@ -459,8 +466,8 @@ class Agent:
 
         frames = load_video_urls(video, sample_fps=sample_fps, max_frames=max_frames)
 
-        prompt = caption or "Describe what happens in this video."
-        message = [{"type": "text", "text": prompt}]
+        prompt = "Describe what happens in this video." if caption is None else caption
+        message = [{"type": "text", "text": prompt}] if prompt else []
         message.extend(
             {"type": "image_url", "image_url": {"url": frame}}
             for frame in frames
@@ -475,27 +482,45 @@ class Agent:
             self.model,
             self.vision_fallback_model,
         )
+        if not prompt:
+            message.insert(0, {"type": "text", "text": "Describe what happens in this video."})
         description = self._describe_content(message)
         self.send_text(description)
 
     def send_inputs(self, inputs: list[InputEvent]):
         """
-        Sends confirmed inputs from an InputBuffer to the agent.
+        Appends confirmed inputs from an InputBuffer as one user message.
+
+        Audio (or its transcript) and video frames stay in the same turn. When
+        text or audio accompanies video, no generic video-description request is
+        added. If preparation fails, the conversation history is left unchanged.
 
         Args:
             inputs (list[InputEvent]): Confirmed text, audio, image, or video inputs.
         """
 
-        for input_event in inputs:
-            match input_event["type"]:
-                case "text":
-                    self.send_text(input_event["value"])
-                case "audio":
-                    self.send_audio(input_event["value"])
-                case "image":
-                    self.send_image(input_event["value"])
-                case "video":
-                    self.send_video(input_event["value"])
+        history_length = len(self.messages)
+        has_prompt = any(item["type"] in {"text", "audio"} for item in inputs)
+        try:
+            for input_event in inputs:
+                match input_event["type"]:
+                    case "text":
+                        self.send_text(input_event["value"])
+                    case "audio":
+                        self.send_audio(input_event["value"])
+                    case "image":
+                        self.send_image(input_event["value"])
+                    case "video":
+                        self.send_video(input_event["value"], caption="" if has_prompt else None)
+
+            content = [part for message in self.messages[history_length:]
+                       for part in message["content"]]
+        finally:
+            # Publish one complete turn, or discard partially prepared inputs.
+            del self.messages[history_length:]
+
+        if content:
+            self._send_message(content)
 
     def generate_image(self, prompt: str, model=None, file_path=None, *,
                        download_max_bytes: int = DEFAULT_DOWNLOAD_LIMIT,
@@ -714,9 +739,30 @@ class Agent:
 
         audio_format = audio_format or "wav"
         encoded_audio = base64.b64encode(audio_bytes).decode("utf-8")
+        self._archive_input_audio(encoded_audio, audio_format, audio_bytes=audio_bytes)
         transcription_file = io.BytesIO(audio_bytes)
         transcription_file.name = f"audio.{audio_format}"
         return encoded_audio, transcription_file, audio_format
+
+    def _archive_input_audio(self, encoded, audio_format, *, audio_bytes=None):
+        from llm_toolkit.media.recording import save_input_audio
+
+        key = (audio_format, hashlib.sha256(encoded.encode("ascii")).digest())
+        existing = self._input_audio_archives.get(key)
+        # Replayed conversation history needs no duplicate file. A fresh audio
+        # send supplies audio_bytes and always gets its own recording.
+        if audio_bytes is None and existing and Path(existing).is_file():
+            return
+        data = base64.b64decode(encoded, validate=True) if audio_bytes is None else audio_bytes
+        self.last_input_audio_path = save_input_audio(data, audio_format, self.recording_dir)
+        self._input_audio_archives[key] = self.last_input_audio_path
+
+    def _archive_message_audio(self, content):
+        if isinstance(content, list):
+            for part in content:
+                if part.get("type") == "input_audio":
+                    audio = part["input_audio"]
+                    self._archive_input_audio(audio["data"], audio["format"])
 
     def _prepare_image(self, image):
         if isinstance(image, Path):
@@ -732,10 +778,13 @@ class Agent:
         logger.info("Transcribing audio with %s", model)
         response = transcription(model=model, file=audio_file, **options)
         if isinstance(response, str):
-            return response
-        if isinstance(response, dict):
-            return response["text"]
-        return response.text
+            transcript = response
+        elif isinstance(response, dict):
+            transcript = response["text"]
+        else:
+            transcript = response.text
+        logger.info("User audio transcript: %s", transcript)
+        return transcript
 
     def _describe_image(self, image, caption=None):
         logger.info("Describing image with %s", self.vision_fallback_model)
@@ -833,6 +882,18 @@ class Agent:
         finally:
             if temporary is not None:
                 self.messages[:] = [message for message in self.messages if message is not temporary]
+
+    def compress_dialogue(self, records, *, max_records=12, max_characters=6000, keep_recent=4, summarizer_factory=None):
+        """Select attributed, audience-filtered source records without paraphrasing.
+
+        The caller supplies trusted id/speaker/audience/content records and owns
+        access control. The returned text is rendered from exact source records;
+        invalid IDs or budgets raise ValueError before any memory is replaced.
+        """
+        from llm_toolkit.agents.memory import compress_dialogue
+
+        return compress_dialogue(self, records, max_records=max_records,
+                                max_characters=max_characters, keep_recent=keep_recent, summarizer_factory=summarizer_factory)
 
     def summarize(self, *, model=None, instructions=None, summarizer_factory=None, speaker_name=None) -> str:
         """Summarize this agent's own memory without modifying its messages.
@@ -951,6 +1012,9 @@ class Agent:
     def _request_completion(self, *, response_format=None):
         messages = self._completion_messages()
         self._validate_completion_modalities(messages)
+        # Includes raw send_message() content and loaded conversation histories.
+        for message in messages:
+            self._archive_message_audio(message.get("content"))
         completion_args = {
             **copy.deepcopy(self.completion_options),
             "model": self.model,
@@ -977,6 +1041,9 @@ class Agent:
             response_message = dict(response_message)
 
         self.messages.append(response_message)
+        spoken = response_message.get("audio")
+        if spoken and self._get_value(spoken, "transcript"):
+            logger.info("Assistant audio transcript: %s", self._get_value(spoken, "transcript"))
         self._track_token_usage(response)
         logger.debug("Stored assistant response; history length is now %s", len(self.messages))
         return response

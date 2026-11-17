@@ -2,6 +2,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
+import soundfile as sf
 
 from llm_toolkit.media import microphone_source as microphone
 
@@ -32,7 +33,7 @@ def source():
     ) as output_factory, patch.object(microphone.MicrophoneSource, "_get_input_source", return_value={"index": 7}), patch.object(
         microphone.sd, "play", side_effect=AssertionError("No convenience playback in callbacks")
     ):
-        source = microphone.MicrophoneSource(monitor_device=8, monitor_buffer_seconds=4 / 24000)
+        source = microphone.MicrophoneSource(save=False, monitor_device=8, monitor_buffer_seconds=4 / 24000)
         source.output_factory = output_factory
         try:
             yield source
@@ -192,3 +193,25 @@ def test_worker_start_failure_closes_input_stream():
     ), patch.object(microphone.threading, "Thread", return_value=thread), pytest.raises(RuntimeError):
         microphone.MicrophoneSource()
     stream.close.assert_called_once()
+
+
+def test_microphone_saves_by_default_including_an_active_recording_on_quit(tmp_path):
+    with patch.object(microphone.sd, "InputStream", side_effect=Stream), patch.object(
+        microphone.MicrophoneSource, "_get_input_source", return_value={"index": 7}
+    ):
+        source = microphone.MicrophoneSource(save_dir=tmp_path)
+        try:
+            source.start_recording()
+            capture(source, [0.1, 0.2, 0.3])
+            path = source.stop_recording()
+            samples, rate = sf.read(path)
+            assert rate == 24000
+            np.testing.assert_allclose(samples, [0.1, 0.2, 0.3], atol=1 / 32768)
+            source.start_recording()
+            capture(source, [0.4, 0.5])
+            source.quit()
+            assert source.last_recording_path != path
+            samples, _ = sf.read(source.last_recording_path)
+            np.testing.assert_allclose(samples, [0.4, 0.5], atol=1 / 32768)
+        finally:
+            source.quit()

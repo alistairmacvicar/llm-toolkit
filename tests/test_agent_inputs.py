@@ -230,8 +230,102 @@ class AgentInputTests(unittest.TestCase):
             ]
         )
 
+        self.assertEqual(len(agent.messages), 1)
         self.assertEqual(agent.messages[0]["content"][0]["text"], "hello")
-        self.assertEqual(agent.messages[1]["content"][0]["type"], "input_audio")
+        self.assertEqual(agent.messages[0]["content"][1]["type"], "input_audio")
+
+    def test_recorded_audio_and_video_reach_completion_as_one_user_turn(self):
+        for native_audio in (False, True):
+            with self.subTest(native_audio=native_audio):
+                agent_module.litellm.supports_audio_input.return_value = native_audio
+                agent = Agent()
+                response = self._response({"role": "assistant", "content": "It is blue."})
+                with (
+                    mock.patch.object(agent_module, "transcription", return_value={
+                        "text": "What colour is the object I am holding?"
+                    }) as transcribe,
+                    mock.patch.object(agent_module, "load_video_urls", return_value=[
+                        "data:image/jpeg;base64,FRAME"
+                    ]),
+                    mock.patch.object(agent_module, "completion", return_value=response) as request,
+                ):
+                    agent.send_inputs([
+                        {"type": "audio", "value": b"recorded speech"},
+                        {"type": "video", "value": "recording.mp4"},
+                    ])
+                    agent.get_response()
+
+                messages = request.call_args.kwargs["messages"]
+                self.assertEqual(len(messages), 2)  # System prompt and one captured turn.
+                content = messages[1]["content"]
+                if native_audio:
+                    transcribe.assert_not_called()
+                    self.assertEqual(content[0]["type"], "input_audio")
+                    self.assertEqual(
+                        base64.b64decode(content[0]["input_audio"]["data"]), b"recorded speech"
+                    )
+                else:
+                    transcribe.assert_called_once()
+                    self.assertEqual(content[0], {
+                        "type": "text", "text": "What colour is the object I am holding?"
+                    })
+                self.assertEqual(content[1:], [{
+                    "type": "image_url", "image_url": {"url": "data:image/jpeg;base64,FRAME"}
+                }])
+
+    def test_video_with_typed_question_does_not_add_a_competing_prompt(self):
+        agent = Agent()
+        with mock.patch.object(agent_module, "load_video_urls", return_value=["frame"]):
+            agent.send_inputs([
+                {"type": "video", "value": "recording.mp4"},
+                {"type": "text", "value": "What colour is it?"},
+            ])
+        self.assertEqual(agent.messages, [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "frame"}},
+            {"type": "text", "text": "What colour is it?"},
+        ]}])
+
+    def test_video_only_capture_retains_default_description_prompt(self):
+        agent = Agent()
+        with mock.patch.object(agent_module, "load_video_urls", return_value=["frame"]):
+            agent.send_inputs([{"type": "video", "value": "recording.mp4"}])
+        self.assertEqual(agent.messages[0]["content"][0], {
+            "type": "text", "text": "Describe what happens in this video."
+        })
+
+    def test_capture_with_audio_and_vision_fallbacks_preserves_both(self):
+        agent_module.litellm.supports_audio_input.return_value = False
+        agent_module.litellm.supports_vision.return_value = False
+        agent = Agent()
+        with (
+            mock.patch.object(agent_module, "transcription", return_value={"text": "What colour is it?"}),
+            mock.patch.object(agent_module, "load_video_urls", return_value=["frame"]),
+            mock.patch.object(agent_module, "completion", return_value=self._response({
+                "role": "assistant", "content": "A person is holding a blue cup."
+            })) as describe,
+        ):
+            agent.send_inputs([
+                {"type": "audio", "value": b"recorded speech"},
+                {"type": "video", "value": "recording.mp4"},
+            ])
+        self.assertEqual(agent.messages, [{"role": "user", "content": [
+            {"type": "text", "text": "What colour is it?"},
+            {"type": "text", "text": "A person is holding a blue cup."},
+        ]}])
+        self.assertEqual(describe.call_args.kwargs["messages"][0]["content"][0]["text"],
+                         "Describe what happens in this video.")
+
+    def test_failed_capture_preparation_does_not_leave_a_partial_turn(self):
+        agent = Agent()
+        agent.send_text("Earlier message")
+        before = agent.get_messages()
+        with mock.patch.object(agent_module, "load_video_urls", side_effect=ValueError("Bad video")):
+            with self.assertRaisesRegex(ValueError, "Bad video"):
+                agent.send_inputs([
+                    {"type": "audio", "value": b"recorded speech"},
+                    {"type": "video", "value": "bad.mp4"},
+                ])
+        self.assertEqual(agent.messages, before)
 
     def test_text_completion_omits_provider_specific_modality_parameters(self):
         agent = Agent(model="anthropic/test-model")

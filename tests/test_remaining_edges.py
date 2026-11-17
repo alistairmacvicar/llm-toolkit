@@ -90,8 +90,8 @@ def test_action_shutdown_attempts_every_resource_and_joins_listener(failed_resou
     handler = ActionHandler.__new__(ActionHandler)
     handler.running = True
     handler.action_handler = Mock()
-    handler.microphone_source = Mock()
-    handler.camera_source = Mock()
+    handler.microphone_source = Mock(is_recording=False)
+    handler.camera_source = Mock(is_recording=False)
     resource = getattr(handler, failed_resource)
     (resource.stop if failed_resource == "action_handler" else resource.quit).side_effect = OSError("cleanup failed")
     with pytest.raises(OSError, match="cleanup failed"):

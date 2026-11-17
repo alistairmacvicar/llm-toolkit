@@ -30,6 +30,7 @@ arguments make the same files useful for one-shot experiments and automation.
 | `input_buffer.py` | Staging, replacing, confirming, discarding, events, and auto-send |
 | `local_capture.py` | Terminal capture with InputBuffer; optional global hotkeys via ActionHandler |
 | `realtime_chat.py` | Model-based realtime connections through LiteLLM, with an optional proxy |
+| `realtime_video.py` | Hands-free voice conversation in the terminal with a native camera preview and automatic recording |
 
 Run a text chat:
 
@@ -61,6 +62,30 @@ or you press Enter at the interactive image-model prompt. The example saves to
 chat model; `--media-model` selects the generation model. A chat model such as
 `gpt-5` cannot be passed directly to the image-generation endpoint. Supply a
 compatible `--media-model` for speech or video.
+
+OpenAI [retired Sora 2 and the Videos API on 24 September 2026](https://developers.openai.com/api/docs/deprecations).
+Requests for `sora-2` or `openai/sora-2` can therefore return HTTP 404. Use an
+available video provider with its own credentials. For example, the installed
+LiteLLM adapter supports Google Cloud's
+[Veo 3.1 production model](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate):
+
+```bash
+python examples/generated_media.py video \
+    --media-model vertex_ai/veo-3.1-generate-001 \
+    --prompt "A suspenseful scene in the Australian outback at dusk"
+```
+
+This route needs Google Cloud credentials, a project with Veo access and billing,
+and `VERTEXAI_PROJECT` and `VERTEXAI_LOCATION` (for example `us-central1`). See
+[LiteLLM's Vertex AI setup](https://docs.litellm.ai/docs/providers/vertex_ai/videos).
+An OpenAI or Gemini API key alone does not configure this route. Google also
+[retired the Gemini API's Veo 3.1 preview models](https://ai.google.dev/gemini-api/docs/video);
+use a currently available model rather than copying an older preview ID.
+
+After a video job is created, enter `status` until it completes, then `save` to
+download it. Creation failures return to the media chooser; status/download
+failures let you retry the same job. A command-line generation failure exits
+with a nonzero status.
 
 Send local media. Unsupported audio and image inputs use the configured fallback
 models automatically:
@@ -219,6 +244,24 @@ or `/preview`; `/record` starts/stops all enabled recording sources together.
 Microphone and camera are off unless their flags are supplied; OS device permissions
 still apply. The default agent returns text replies.
 
+To capture speech and video together, run
+`python examples/local_capture.py --camera --microphone`, enter `/record` to
+start, then `/record` again to stop. `/pending` should list both `audio` and `video`;
+use `/send` to request a reply. The saved MP4 ending in `-with-audio.mp4` includes
+the microphone audio, aligned to the camera's start time. The original camera
+file and separate microphone WAV are retained. Audio is saved automatically;
+`--save` is kept for compatibility but is no longer needed. `--save-dir PATH`
+changes the recording directory. The agent receives both inputs in one user
+message. Models without audio input receive a transcript from
+the configured transcription model, so spoken questions remain alongside the
+video frames instead of being followed by a generic video-description request.
+
+`/preview` keeps the camera window responsive while you type and while the agent
+replies. OpenCV window operations run on the main thread, including on macOS.
+When using `CameraSource` directly, call `poll_preview()` regularly on the main
+thread. `--log-level INFO` (the default) shows available audio transcripts and
+recording paths; it cannot show a transcript the selected provider did not return.
+
 For system-wide shortcuts, add `--global-hotkeys`: `t` opens terminal text input,
 hold `a` for push-to-talk, `m` toggles monitoring, `p` toggles camera preview, `s`
 takes a snapshot, `r` toggles recording, Enter confirms, Escape discards, and `q`
@@ -230,6 +273,74 @@ that app. Input Monitoring may also need permission. See
 [pynput's macOS requirements](https://pynput.readthedocs.io/en/stable/limitations.html#macos).
 The example falls back to terminal controls when global keyboard permission is
 missing; using the default controls avoids that permission requirement.
+
+### Hands-free video and audio
+
+Put `OPENAI_API_KEY` in your `.env`, then run:
+
+```bash
+python examples/realtime_video.py
+```
+
+The camera preview opens in a regular window. Speak normally, pause for a spoken
+reply, or interrupt the agent. Transcripts appear in the terminal as `You:` and
+`Agent:`. The microphone streams continuously and replies play as they arrive;
+there is no push-to-talk or confirmation step. Type `/quit`, press Ctrl-C, or
+press **Q/Esc in the preview window** to stop and save. Closing the preview also
+ends the session. Camera and microphone permissions apply to the app running
+Python.
+
+Use headphones: native audio does not have the browser's echo cancellation.
+On macOS the example prefers the **built-in microphone**, keeping the system's
+selected output (such as AirPods). This avoids using the AirPods microphone by
+default. It prints both chosen devices and does not change macOS sound settings.
+List devices or choose them explicitly:
+
+```bash
+python examples/realtime_video.py --list-devices
+python examples/realtime_video.py \
+    --input-device "MacBook Air Microphone" --output-device "AirPods"
+```
+
+Device names or numeric indices are accepted. `--camera 1` selects a different
+camera. Both audio streams are closed on exit, including setup failures.
+
+The agent sees one JPEG camera snapshot per second alongside live audio. The
+preview and local recording are full video; the model's visual input is sampled
+frames. Only the latest 30 snapshots remain in its conversation. This example
+uses `RealtimeSession` through LiteLLM's WebSocket bridge with an image-capable
+OpenAI realtime model, defaulting to `openai/gpt-realtime`. Voice activity detection
+starts replies after you pause. When you interrupt, queued speech is discarded
+and the conversation is truncated to the audio already played.
+
+Recordings stream to a unique `recordings/live_.../` folder during the session:
+
+- `camera_...-with-audio.mp4`: camera video **with microphone audio**; the original
+  silent camera file is retained.
+- `microphone_....wav`: captured microphone audio, including queued audio at exit.
+- `input-audio_....wav`: the exact PCM sent through `RealtimeSession`.
+- `agent_....wav`: each received agent audio reply, including any unheard portion
+  received before an interruption.
+- `transcripts.jsonl`: available user and agent transcripts, also shown in the terminal.
+- `session.json`: model and session start/finish times.
+
+WAV chunks are flushed to disk during the session. On exit, the example combines
+the microphone and video with their start times aligned. A recording, device,
+storage, or connection failure ends the session and retains the captured files;
+unfinished captures may be partial. Microphone and playback queues are bounded.
+
+```bash
+python examples/realtime_video.py --voice marin --frame-interval 1 \
+    --save-dir recordings
+```
+
+`--model` selects the OpenAI realtime model; `--transcription-model` defaults to
+`gpt-4o-mini-transcribe`. The terminal shows where it is saving. `--log-level INFO`
+adds library diagnostics and available transcripts to the logs. Running the
+example starts the preview and connection; microphone streaming starts once
+session setup succeeds. `--list-devices` only lists devices and exits.
+
+### Typed realtime chat
 
 The realtime demo connects by `provider/model`, using LiteLLM's realtime adapters
 inside the Python process. It does not require a separately running proxy:

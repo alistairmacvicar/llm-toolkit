@@ -1,11 +1,13 @@
 import queue
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, final
 
 from llm_toolkit.logging import get_logger
 from llm_toolkit.media.camera_source import CameraSource
 from llm_toolkit.media.microphone_source import MicrophoneSource
+from llm_toolkit.media.recording import toggle_recording_sources
 from llm_toolkit.types import ActionEvent, InputEvent
 from llm_toolkit.util.input_buffer import InputBuffer
 
@@ -91,20 +93,10 @@ class ActionHandler:
                     logger.debug("Camera snapshot staged")
             case self.record_key:
                 logger.debug("Recording toggled for active sources")
-                completed_inputs = []
-
-                if self.microphone_source is not None:
-                    was_recording = self.microphone_source.is_recording
-                    audio = self.microphone_source.toggle_recording()
-                    if was_recording and audio is not None:
-                        completed_inputs.append({"type": "audio", "value": audio})
-
-                if self.camera_source is not None:
-                    was_recording = self.camera_source.is_recording
-                    video_path = self.camera_source.toggle_recording()
-                    if was_recording and video_path is not None:
-                        completed_inputs.append({"type": "video", "value": video_path})
-
+                sources = [(kind, source) for kind, source in (
+                    ("audio", self.microphone_source), ("video", self.camera_source)
+                ) if source is not None]
+                completed_inputs = toggle_recording_sources(sources)
                 self.input_buffer.stage_many(completed_inputs)
             case self.quit_key:
                 logger.info("Quit key pressed")
@@ -141,6 +133,12 @@ class ActionHandler:
         logger.info("Stopping action handler")
         self.running = False
         error = None
+        if (self.camera_source is not None and self.microphone_source is not None
+                and self.camera_source.is_recording and self.microphone_source.is_recording):
+            try:
+                toggle_recording_sources([("audio", self.microphone_source), ("video", self.camera_source)])
+            except Exception as exc:
+                error = exc
         cleanup = [self.action_handler.stop]
         if self.microphone_source is not None:
             cleanup.append(self.microphone_source.quit)
@@ -200,4 +198,18 @@ class ActionHandler:
             ActionEvent: The next queued event.
         """
 
-        return self.events.get(block=block, timeout=timeout)
+        if self.camera_source is None or threading.current_thread() is not threading.main_thread():
+            return self.events.get(block=block, timeout=timeout)
+        if timeout is not None and timeout < 0:
+            raise ValueError("timeout must be non-negative")
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            self.camera_source.poll_preview()
+            if not block:
+                return self.events.get_nowait()
+            wait = 0.02 if deadline is None else max(0, min(0.02, deadline - time.monotonic()))
+            try:
+                return self.events.get(timeout=wait)
+            except queue.Empty:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise

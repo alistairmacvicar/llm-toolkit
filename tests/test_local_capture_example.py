@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import sys
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,8 +77,8 @@ class LocalCaptureExampleTests(unittest.TestCase):
 
     def test_recorded_sources_and_text_are_confirmed_as_one_batch_and_closed(self):
         self.arguments.camera = self.arguments.microphone = True
-        camera = mock.Mock(is_recording=False)
-        microphone = mock.Mock(is_recording=False)
+        camera = mock.Mock(is_recording=False, recording_started_at=1.0)
+        microphone = mock.Mock(is_recording=False, recording_started_at=1.0)
         camera.snapshot.return_value = "snapshot.jpg"
 
         def toggle(source, value):
@@ -86,18 +87,20 @@ class LocalCaptureExampleTests(unittest.TestCase):
             return value if was_recording else None
 
         camera.toggle_recording.side_effect = lambda: toggle(camera, "recording.mp4")
-        microphone.toggle_recording.side_effect = lambda: toggle(microphone, b"recorded audio")
+        microphone.toggle_recording.side_effect = lambda: toggle(microphone, "recorded-audio.wav")
         with (
             mock.patch.object(self.example, "CameraSource", return_value=camera),
             mock.patch.object(self.example, "MicrophoneSource", return_value=microphone),
+            mock.patch("llm_toolkit.media.recording.mux_recordings", return_value="recording-with-audio.mp4") as mux,
         ):
             self.run_demo(["/record", "What is happening?", "/snapshot", "/record", "/send", "/quit"])
         self.agent.send_inputs.assert_called_once_with([
             {"type": "text", "value": "What is happening?"},
             {"type": "image", "value": "snapshot.jpg"},
-            {"type": "audio", "value": b"recorded audio"},
-            {"type": "video", "value": "recording.mp4"},
+            {"type": "audio", "value": "recorded-audio.wav"},
+            {"type": "video", "value": "recording-with-audio.mp4"},
         ])
+        mux.assert_called_once_with("recording.mp4", "recorded-audio.wav", audio_offset=0.0)
         camera.quit.assert_called_once()
         microphone.quit.assert_called_once()
 
@@ -107,6 +110,43 @@ class LocalCaptureExampleTests(unittest.TestCase):
             output = self.run_demo(["Hello", "/send", "/quit"])
         self.agent.get_response.assert_called_once()
         self.assertIn("Using terminal controls instead", output)
+
+    def test_camera_only_recording_explains_how_to_include_audio(self):
+        camera = mock.Mock(is_recording=False)
+        output = io.StringIO()
+        with (
+            mock.patch("builtins.input", side_effect=["/record", "/quit"]),
+            contextlib.redirect_stdout(output),
+        ):
+            self.example.run_terminal(self.agent, camera, None, auto_send=False)
+        self.assertIn("Video only", output.getvalue())
+        self.assertIn("--microphone", output.getvalue())
+
+    def test_preview_keeps_pumping_on_main_thread_during_blocking_work(self):
+        release = threading.Event()
+        polled_threads = []
+        camera = mock.Mock()
+        def poll():
+            polled_threads.append(threading.current_thread())
+            if len(polled_threads) >= 2:
+                release.set()
+        camera.poll_preview.side_effect = poll
+        result = self.example.with_preview(camera, lambda: release.wait(timeout=1))
+        self.assertTrue(result)
+        self.assertGreaterEqual(len(polled_threads), 2)
+        self.assertTrue(all(thread is threading.main_thread() for thread in polled_threads))
+
+    def test_empty_microphone_capture_is_reported_and_not_sent(self):
+        microphone = mock.Mock(is_recording=True)
+        microphone.toggle_recording.return_value = None
+        output = io.StringIO()
+        with (
+            mock.patch("builtins.input", side_effect=["/record", "/send", "/quit"]),
+            contextlib.redirect_stdout(output),
+        ):
+            self.example.run_terminal(self.agent, None, microphone, auto_send=False)
+        self.assertIn("No audio was captured", output.getvalue())
+        self.agent.send_inputs.assert_not_called()
 
     def test_eof_and_interrupt_close_capture_devices(self):
         self.arguments.microphone = True

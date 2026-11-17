@@ -82,7 +82,7 @@ async def print_response(session: RealtimeSession):
     raise RealtimeDemoError("The connection closed before the reply finished.")
 
 
-async def read_message():
+async def read_message(prompt="You: "):
     """Keep WebSocket heartbeats running while the terminal waits for a line."""
     loop = asyncio.get_running_loop()
     result = loop.create_future()
@@ -106,7 +106,7 @@ async def read_message():
 
         def read():
             try:
-                value = input("You: ").strip()
+                value = input(prompt).strip()
                 loop.call_soon_threadsafe(lambda: None if result.done() else result.set_result(value))
             except EOFError:
                 if not loop.is_closed():
@@ -116,7 +116,7 @@ async def read_message():
 
         threading.Thread(target=read, daemon=True).start()
         return await result
-    print("You: ", end="", flush=True)
+    print(prompt, end="", flush=True)
     try:
         return await result
     finally:

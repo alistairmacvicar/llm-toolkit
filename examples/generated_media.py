@@ -2,9 +2,33 @@ import argparse
 
 from pathlib import Path
 
+from openai import APIError
+
 from llm_toolkit import Agent, configure_logging
 
 DEFAULT_IMAGE_MODEL = "openai/gpt-image-2.5-flare"
+
+
+def report_error(action, media_model, error):
+    status = getattr(error, "status_code", None)
+    status_label = f", HTTP {status}" if status is not None else ""
+    print(f"{action} failed ({media_model}{status_label}): {error}")
+    model = media_model.removeprefix("openai/")
+    if status == 404 and (model == "sora-2" or model.startswith("sora-2-")):
+        print("OpenAI retired Sora 2 and the Videos API on 24 September 2026.")
+        print("Choose an available video provider/model; adding openai/ will not fix this endpoint.")
+        print("Details: https://developers.openai.com/api/docs/deprecations")
+    elif status == 404:
+        print("Check the provider/model name, endpoint, and your account's access to that model.")
+
+
+def try_generate(agent, kind, media_model, prompt, output):
+    try:
+        generate(agent, kind, media_model, prompt, output)
+    except (APIError, OSError, ValueError) as error:
+        report_error(f"{kind.capitalize()} generation", media_model, error)
+        return False
+    return True
 
 
 def generate(agent: Agent, kind: str, media_model: str, prompt: str, output: str):
@@ -41,13 +65,19 @@ def generate(agent: Agent, kind: str, media_model: str, prompt: str, output: str
 
         while True:
             command = input("Video: ").strip().lower()
-            if command == "status":
-                print(agent.get_video_status(video_id))
-            elif command == "save":
-                print(f"Saved video: {agent.save_video(video_id, output)}")
+            if command in {"back", "/quit"}:
                 break
-            elif command == "back":
-                break
+            try:
+                if command == "status":
+                    print(agent.get_video_status(video_id))
+                elif command == "save":
+                    print(f"Saved video: {agent.save_video(video_id, output)}")
+                    break
+                else:
+                    print("Commands: status, save, or back")
+            except (APIError, OSError, ValueError) as error:
+                report_error(f"Video {command}", media_model, error)
+                print("The video job is still selected. Try status, save, or back.")
 
 
 def main(arguments):
@@ -58,14 +88,14 @@ def main(arguments):
 
     if arguments.kind and media_model and arguments.prompt:
         output = arguments.output or get_default_output(arguments.kind)
-        generate(
+        succeeded = try_generate(
             agent,
             arguments.kind,
             media_model,
             arguments.prompt,
             output,
         )
-        return
+        return 0 if succeeded else 1
 
     print("Choose image, speech, or video. Enter /quit to stop.")
     print("Use a model for the selected media type.")
@@ -91,7 +121,9 @@ def main(arguments):
         output = input(f"Output path [{default_output}]: ").strip() or default_output
 
         if media_model and prompt:
-            generate(agent, kind, media_model, prompt, output)
+            try_generate(agent, kind, media_model, prompt, output)
+
+    return 0
 
 
 def get_default_output(kind: str) -> str:
@@ -117,4 +149,4 @@ if __name__ == "__main__":
     parser.add_argument("--output")
     arguments = parser.parse_args()
     configure_logging()
-    main(arguments)
+    raise SystemExit(main(arguments))

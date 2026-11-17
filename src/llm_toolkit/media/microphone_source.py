@@ -2,7 +2,6 @@ import threading
 import time
 import math
 from datetime import datetime
-from pathlib import Path
 from typing import final
 import queue
 
@@ -11,6 +10,7 @@ import numpy as np
 import soundfile as sf
 
 from llm_toolkit.logging import get_logger
+from llm_toolkit.media.recording import recording_directory
 
 logger = get_logger(__name__)
 
@@ -69,13 +69,13 @@ class MicrophoneSource:
     Completed recordings are kept in memory until the next recording starts.
     """
 
-    def __init__(self, source: int = -1, save: bool = False, save_dir: str = "recordings",
+    def __init__(self, source: int = -1, save: bool = True, save_dir: str = None,
                  *, monitor_device: int | None = None, monitor_buffer_seconds: float = 0.25):
         """Open an input source without starting capture.
 
         Args:
             source (int): Input device index, or -1 for the system default.
-            save (bool): Save completed recordings as WAV files.
+            save (bool): Save completed recordings as WAV files. Defaults to True.
             save_dir (str): Recording output directory.
             monitor_device (int | None): Output device index, or None for the default.
             monitor_buffer_seconds (float): Maximum buffered monitor audio in seconds.
@@ -87,7 +87,8 @@ class MicrophoneSource:
         self._audio_queue = queue.SimpleQueue()
         self._audio_data = []
         self._save = save
-        self._save_dir = Path(save_dir)
+        self._save_dir = recording_directory(save_dir)
+        self.recording_started_at = None
         self.last_recording = None
         self.last_recording_path = None
 
@@ -211,6 +212,7 @@ class MicrophoneSource:
             self.last_recording = None
             self.last_recording_path = None
             with self._recording_lock:
+                self.recording_started_at = time.monotonic()
                 self._recording = True
             try:
                 if not self._input_stream.active:
@@ -280,6 +282,11 @@ class MicrophoneSource:
     def quit(self):
         logger.info("Stopping microphone source")
         error = None
+        if self._recording:
+            try:
+                self.stop_recording()
+            except Exception as exc:
+                error = exc
         with self._lock:
             if not self.running:
                 return

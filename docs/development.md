@@ -16,6 +16,12 @@ Live-provider tests are opt-in: `RUN_LIVE_TESTS=1 python -m pytest
 tests/test_live_providers.py`. They require configured credentials and incur
 provider charges. The model names are configured in that test file.
 
+The native realtime tests use fake audio devices and transport. They cover
+recording the transmitted microphone audio, playback timing and interruption,
+bounded frame context, cancellation, storage failures, and device cleanup.
+Media integration tests exercise real audio/video muxing. None of these tests
+captures physical devices or starts a paid realtime session.
+
 CI runs the offline suite on Python 3.11, 3.12, 3.13, and 3.14, and builds the
 source distribution and wheel. It installs Linux media system libraries, but
 does not open a camera, microphone, or keyboard listener.

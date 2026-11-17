@@ -20,7 +20,8 @@ class RealtimeEnsemble:
 
     The supplied Director owns the durable text memories. Each realtime peer is
     seeded with only that agent's history. ``emit`` and ``wait_playback`` are async
-    application callbacks; no browser, filesystem or audio device is required.
+    application callbacks; no browser or audio device is required. Default peer
+    sessions archive outgoing audio to the configured recording directory.
     Sessions reconnect from committed memories after a transport failure. An
     interrupted utterance is never automatically replayed to a provider.
     """

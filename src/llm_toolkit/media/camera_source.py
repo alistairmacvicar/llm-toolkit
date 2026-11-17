@@ -1,29 +1,33 @@
+import math
 import threading
 import time
-import math
 from datetime import datetime
-from pathlib import Path
 from typing import final
 
 import cv2
 
 from llm_toolkit.logging import get_logger
+from llm_toolkit.media.recording import recording_directory
 
 logger = get_logger(__name__)
 
 
 @final
 class CameraSource:
-    def __init__(self, source: int = 0, save_dir: str = "recordings"):
+    def __init__(self, source: int = 0, save_dir: str = None):
         self._show_preview = False
+        self._preview_open = False
         self._recording = False
         self._capture = cv2.VideoCapture(source)
         self._lock = threading.Lock()
-        self._save_dir = Path(save_dir)
+        self._save_dir = recording_directory(save_dir)
         self._video_writer = None
         self.last_snapshot_path = None
         self.last_recording_path = None
         self._closed = False
+        self.recording_started_at = None
+        self._recording_fps = 30
+        self._recorded_frames = 0
 
         self.running = True
         try:
@@ -48,39 +52,60 @@ class CameraSource:
             with self._lock:
                 self.success, self._frame = self._capture.read()
                 frame = self._frame.copy() if self.success else None
-                show_preview = self._show_preview
-
                 if frame is not None and self._recording and self._video_writer is not None:
-                    self._video_writer.write(frame)
+                    self._write_recording_frame(frame)
 
-            if frame is not None:
-                if show_preview:
-                    cv2.imshow("Capture", frame)
-                    cv2.waitKey(1)
-            else:
+            if frame is None:
                 time.sleep(0.01)
 
     def toggle_capture(self):
+        """Request preview visibility; call poll_preview() on the main thread."""
         with self._lock:
             self._ensure_open()
-            if self._show_preview:
-                self._hide_capture()
-            else:
-                self._show_capture()
+            self._show_preview = not self._show_preview
+        return self._show_preview
 
-    def _show_capture(self):
-        cv2.namedWindow("Capture", cv2.WINDOW_NORMAL)
-        self._show_preview = True
-        logger.info("Camera preview started")
+    @property
+    def preview_visible(self):
+        """Whether the preview is requested and has not been closed by the user."""
+        return self._show_preview and not self._closed
 
-    def _hide_capture(self):
-        self._show_preview = False
+    def poll_preview(self):
+        """Pump native window events on the main thread, including during input waits."""
+        if threading.current_thread() is not threading.main_thread():
+            raise RuntimeError("Camera preview must be updated on the main thread")
+        if self._closed or not self._show_preview:
+            self._close_preview()
+            return -1
+        if not self._preview_open:
+            cv2.namedWindow("Capture", cv2.WINDOW_NORMAL)
+            self._preview_open = True
+            logger.info("Camera preview started")
+        frame = self.get_frame()
+        if frame is not None:
+            cv2.imshow("Capture", frame)
+        key = cv2.waitKey(1)
+        if key == 27 or cv2.getWindowProperty("Capture", cv2.WND_PROP_VISIBLE) < 1:
+            self._show_preview = False
+            self._close_preview()
+        return key
+
+    def _close_preview(self):
+        if not self._preview_open:
+            return
         try:
             cv2.destroyWindow("Capture")
         except cv2.error:
             logger.debug("Camera preview window was already closed")
-        else:
-            logger.info("Camera preview stopped")
+        self._preview_open = False
+        logger.info("Camera preview stopped")
+
+    def get_frame(self):
+        """Copy the latest frame without waiting for a blocking device read."""
+        # The worker replaces this array, never mutates it. Holding a reference
+        # lets the GUI copy the previous frame even while read() is waiting.
+        frame = self._frame
+        return frame.copy() if frame is not None else None
 
     def snapshot(self) -> str:
         self._save_dir.mkdir(parents=True, exist_ok=True)
@@ -128,6 +153,9 @@ class CameraSource:
             writer.release()
             raise
         self._video_writer = writer
+        self.recording_started_at = time.monotonic()
+        self._recording_fps = fps
+        self._recorded_frames = 0
 
         self.last_recording_path = str(file_path)
         self._recording = True
@@ -135,12 +163,26 @@ class CameraSource:
         return self.last_recording_path
 
     def _stop_recording(self):
-        self._recording = False
-        writer, self._video_writer = self._video_writer, None
-        if writer is not None:
-            writer.release()
+        try:
+            if self._recording and self._video_writer is not None and self._frame is not None:
+                self._write_recording_frame(self._frame)
+        finally:
+            self._recording = False
+            writer, self._video_writer = self._video_writer, None
+            if writer is not None:
+                writer.release()
         logger.info("Camera recording stopped: %s", self.last_recording_path)
         return self.last_recording_path
+
+    def _write_recording_frame(self, frame):
+        if self.recording_started_at is None:
+            return
+        # Match file timestamps to elapsed capture time even if the device
+        # delivers frames at a different rate than its advertised FPS.
+        count = max(1, math.ceil((time.monotonic() - self.recording_started_at) * self._recording_fps))
+        while self._recorded_frames < count:
+            self._video_writer.write(frame)
+            self._recorded_frames += 1
 
     @property
     def is_recording(self) -> bool:
@@ -155,6 +197,8 @@ class CameraSource:
 
     def quit(self):
         logger.info("Stopping camera source")
+        if threading.current_thread() is threading.main_thread():
+            self._close_preview()
         if self._closed:
             return
         self._closed = True
@@ -170,13 +214,7 @@ class CameraSource:
                 self._stop_recording()
         except Exception as exc:
             error = exc
-        try:
-            try:
-                cv2.destroyWindow("Capture")
-            except cv2.error:
-                logger.debug("Camera preview window was already closed")
-        finally:
-            self._capture.release()
+        self._capture.release()
         if error is not None:
             raise error
         logger.info("Camera source stopped")
